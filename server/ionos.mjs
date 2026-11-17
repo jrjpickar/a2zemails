@@ -104,8 +104,8 @@ export function forwardedReferences(input) {
  });
 }
 
-async function readPart(imap,uid,part,limit) {
- const {content} = await imap.download(uid,part,{uid:true,maxBytes:limit+1});
+async function readPart(imap,uid,part,limit,chunkSize) {
+ const {content} = await imap.download(uid,part,{uid:true,maxBytes:limit+1,...(chunkSize?{chunkSize}:{})});
  if (!content) return null;
  const chunks=[];
  let size=0;
@@ -199,12 +199,100 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   } finally { imap.close(); }
  }
 
+ async function readConnection(operation) {
+  const imap=new Imap(config.imap);
+  imap.on?.('error',()=>{});
+  try {await imap.connect();return await operation(imap);}
+  finally {imap.close();}
+ }
+
+ async function readFolder(folder,operation) {
+  return readConnection(async imap=>{
+   const lock=await imap.getMailboxLock(folder,{readOnly:true});
+   try {return await operation(imap);}
+   finally {lock.release();}
+  });
+ }
+
+ function messageMetadata(item,folder,generation) {
+  const envelope=item.envelope||{};
+  const flags=item.flags||new Set();
+  return {
+   id:folder+':'+generation+':'+item.uid,
+   uid:item.uid,subject:envelope.subject||'(No subject)',
+   date:item.internalDate?.toISOString()||null,
+   sentAt:envelope.date?.toISOString()||null,
+   from:addressList(envelope.from),to:addressList(envelope.to),cc:addressList(envelope.cc),bcc:addressList(envelope.bcc),
+   replyTo:addressList(envelope.replyTo),messageId:envelope.messageId||'',inReplyTo:envelope.inReplyTo||'',
+   flags:[...flags],bytes:item.size||0,attachments:attachedFiles(item.bodyStructure),
+  };
+ }
+
  const mailbox = {
   mail() {
    if (!fetching) fetching = readMail().finally(()=>{fetching=undefined});
    return fetching;
   },
-  async body(id) {
+  folders() {
+   return readConnection(async imap=>(await imap.list()).filter(
+    folder=>!folder.flags.has('\\Noselect')).map(folder=>({path:folder.path,role:folder.specialUse||null})));
+  },
+  messagePage(folder,{before,after,limit,generation}) {
+   return readFolder(folder,async imap=>{
+    const uidValidity=String(imap.mailbox.uidValidity);
+    const uidNext=Number(imap.mailbox.uidNext);
+    if (!Number.isSafeInteger(uidNext)||uidNext<1) throw new Error('IONOS did not provide the folder UID checkpoint.');
+    const highWaterUid=uidNext-1;
+    if (generation&&generation!==uidValidity) return {uidValidity,highWaterUid,resetRequired:true};
+    const ascending=after!==undefined;
+    let edge=ascending?after:Math.min(before??highWaterUid+1,highWaterUid+1);
+    const uids=[];
+    const windowSize=4096;
+    // Bounded UID searches avoid downloading or enumerating the whole folder on every page.
+    for (let step=0;step<4&&uids.length<limit;step++) {
+     const low=ascending?edge+1:Math.max(1,edge-windowSize);
+     const high=ascending?Math.min(highWaterUid,edge+windowSize):edge-1;
+     if (low>high) break;
+     const matches=await imap.search({uid:low+':'+high},{uid:true});
+     const ordered=(matches||[]).sort(ascending?(a,b)=>a-b:(a,b)=>b-a);
+     const available=limit-uids.length;
+     const selected=ordered.slice(0,available);
+     uids.push(...selected);
+     edge=ordered.length>available?selected.at(-1):ascending?high:low;
+    }
+    const rows=uids.length
+     ? await imap.fetchAll(uids,{uid:true,envelope:true,internalDate:true,flags:true,size:true,bodyStructure:true},{uid:true})
+     : [];
+    const byUid=new Map(rows.map(item=>[item.uid,item]));
+    const messages=uids.filter(uid=>byUid.has(uid)).map(uid=>messageMetadata(byUid.get(uid),folder,uidValidity));
+    const hasMore=ascending?edge<highWaterUid:edge>1;
+    return {uidValidity,highWaterUid,messages,hasMore,next:hasMore?edge:null};
+   });
+  },
+  async messageInfo(id,includeHeaders=false) {
+   const match=messageLocation(id);
+   if (!match) throw new TypeError('Invalid message ID.');
+   const [,folder,generation,uid]=match;
+   return readFolder(folder,async imap=>{
+    if (String(imap.mailbox.uidValidity)!==generation) return null;
+    const item=await imap.fetchOne(uid,{uid:true,envelope:true,internalDate:true,flags:true,size:true,bodyStructure:true,headers:includeHeaders},{uid:true});
+    if (!item) return null;
+    return {...messageMetadata(item,folder,generation),...(includeHeaders?{headers:item.headers?.toString('utf8')||''}:{})};
+   });
+  },
+  async rawMessage(id,limit) {
+   const match=messageLocation(id);
+   if (!match) throw new TypeError('Invalid message ID.');
+   const [,folder,generation,uid]=match;
+   return readFolder(folder,async imap=>{
+    if (String(imap.mailbox.uidValidity)!==generation) return null;
+    const result=await readPart(imap,uid,undefined,limit,1024*1024);
+    if (!result) return null;
+    if (result.truncated) throw new TypeError('Original email exceeds the 96 MB export limit.');
+    return {name:'message-'+uid+'.eml',type:'message/rfc822',content:result.raw};
+   });
+  },
+  async body(id,{includeHtml=true,includeImages=true}={}) {
    const match = messageLocation(id);
    if (!match) throw new TypeError('Invalid message.');
    const [,path,generation,uid] = match;
@@ -222,7 +310,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
      let body='', html='', truncated=false;
      const images=Object.create(null);
      for (const {part,type} of parts.slice(0,4)) {
-      if ((type==='text/plain' && body.trim()) || (type==='text/html' && html)) continue;
+      if ((type==='text/plain' && body.trim()) || (type==='text/html' && (html||(!includeHtml&&body.trim())))) continue;
       const result=await readPart(imap,uid,part,detailLimit);
       if (!result) continue;
       const text=result.raw.toString('utf8');
@@ -239,7 +327,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
       }
       if (!result.truncated && text.trim()) html=text;
      }
-     if (html) {
+     if (html&&includeHtml&&includeImages) {
       const requested = new Set([...html.matchAll(/\bcid:([^"'<>\s]+)/gi)].map(match=>{
        try {return decodeURIComponent(match[1]).toLowerCase();} catch {return match[1].toLowerCase();}
       }));
@@ -256,7 +344,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
        } catch { /* A missing inline image should not hide the message. */ }
       }
      }
-     return {body,truncated,...(html?{html,images}:{})};
+     return {body,truncated,...(html&&includeHtml?{html,...(includeImages?{images}:{})}:{})};
     } finally {lock.release();}
    } finally {imap.close();}
   },
@@ -311,13 +399,13 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     } finally {lock.release();}
    } finally {imap.close();}
   },
-  async send(input, uploaded=[]) {
+  async send(input, uploaded=[], links=[]) {
    const addresses = value => typeof value === 'string' ? value.split(/[,;]/).map(part=>part.trim()).filter(Boolean) : [];
    const to = addresses(input?.to), cc = addresses(input?.cc);
    const {subject,body,id} = input || {};
    if (!to.length || to.length+cc.length>50 || [...to,...cc].some(value=>!mailboxAddress.test(value)) ||
        typeof subject!=='string' || !subject.trim() || subject.length>500 || /[\r\n]/.test(subject) ||
-       typeof body!=='string' || !body.trim() || body.length>150000 ||
+       typeof body!=='string' || (!body.trim()&&!links.length) || body.length>150000 ||
        typeof id!=='string' || !/^out-[0-9a-f-]{36}$/i.test(id)) {
     throw new TypeError('Enter valid recipients, a subject, and a message.');
    }
@@ -336,11 +424,14 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    }
    const inline=signatureImage(input.signatureImage);
    const cid='a2z-signature-'+id+'@'+config.email.split('@')[1];
-   const escaped=body.replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-   const html=inline ? '<div style="white-space:pre-wrap">'+escaped+'</div><p><img src="cid:'+cid+'" alt="Email signature" style="max-width:320px;height:auto"></p>' : undefined;
+   const escape=value=>value.replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+   const linksText=links.length?'\n\nDownloads (links expire in 7 days)\n'+links.map(link=>link.name+'\n'+link.url).join('\n\n'):'';
+   const linksHtml=links.length?'<p>Downloads (links expire in 7 days)</p><ul>'+links.map(link=>'<li><a href="'+escape(link.url)+'">'+escape(link.name)+'</a></li>').join('')+'</ul>':'';
+   const inlineHtml=inline?'<p><img src="cid:'+cid+'" alt="Email signature" style="max-width:320px;height:auto"></p>':'';
+   const html=inline||links.length?'<div style="white-space:pre-wrap">'+escape(body)+'</div>'+inlineHtml+linksHtml:undefined;
    if (inline) attachments.push({filename:'signature.'+inline.type.split('/')[1],content:inline.content,contentType:inline.type,cid});
    const message = {
-    from:config.email,to,cc,subject,text:body,html,attachments:[...attachments,...uploaded],
+    from:config.email,to,cc,subject,text:body+linksText,html,attachments:[...attachments,...uploaded],
     messageId:'<'+id+'@'+config.email.split('@')[1]+'>',
     references:refs,inReplyTo:refs.at(-1),disableFileAccess:true,disableUrlAccess:true,
    };

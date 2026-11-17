@@ -44,8 +44,8 @@ export function stagedAttachments(email,store=getStore({name:'mail-uploads',cons
    }
    return count;
   },
-  async readChunk(draft,file,index) {
-   if (!Number.isInteger(index)||index<0||index>=Math.ceil(MAX_STAGED_BYTES/CHUNK_BYTES)) throw new TypeError('Invalid attachment chunk.');
+  async readChunk(draft,file,index,maxBytes=MAX_STAGED_BYTES) {
+   if (!Number.isInteger(index)||index<0||index>=Math.ceil(maxBytes/CHUNK_BYTES)) throw new TypeError('Invalid attachment chunk.');
    const data=await store.get(partKey(draft,checkedId(file),index),{type:'arrayBuffer'});
    return data&&Buffer.from(data);
   },

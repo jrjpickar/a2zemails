@@ -11,6 +11,8 @@
     "ionos": "node --env-file=.env server/local.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1170.0",
+    "@aws-sdk/s3-request-presigner": "^3.1170.0",
     "@netlify/blobs": "^11.1.9",
     "dompurify": "^3.4.18",
     "imapflow": "^1.0.0",

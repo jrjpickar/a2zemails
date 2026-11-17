@@ -81,3 +81,40 @@ The API calculates the same metrics as the Command Center from the configured ma
 Open an incoming PDF or supported image from the attachment card for a preview, download, or new tab. Other attachment types can be downloaded. Forward includes the original attachment references and fetches the file bytes from IONOS when sending. If the source message moved, refresh the mailbox and forward from its current folder. The existing 24 MB total applies to all message attachments, including forwarded files. In **Edit signature**, upload a PNG, JPEG, GIF, or WebP image up to 256 KB. It is sent as an inline email image. Plain-text clients see the signature text.
 
 This app remains an IONOS mail client. IONOS administrative and Webmail features such as filters, aliases, calendar, address book sync, and server-side drafts are outside the current build.
+
+## Full mailbox access for MCP
+
+Use a distinct random `MCP_MAIL_TOKEN` for the full feed. Set it in Netlify Production → Functions and in the MCP HTTP tool's bearer credential. The statistics token still has access only to Command Center counts. Both integrations report on the mailbox in `MCP_IONOS_EMAIL`.
+
+| HTTP request | Response |
+| --- | --- |
+| `GET /api/mcp/mail/folders` | Selectable IMAP folders, including Sent, Drafts, Archive, and any custom folders that exist. |
+| `GET /api/mcp/mail/messages?folder=INBOX&limit=25` | Compact rows with a single column list, folder generation, UID checkpoint, and pagination. No bodies or file bytes. |
+| `GET /api/mcp/mail/messages?folder=INBOX&limit=25&view=full` | Named envelope fields, flags, reply information, and attachment metadata. |
+| `GET /api/mcp/mail/message?id=<URL-encoded id>` | Envelope, attachments, and plain text. Use `format=metadata` to omit the body, `format=html` if needed, and `headers=1` for original headers. |
+| `POST /api/mcp/mail/export?id=<URL-encoded id>` | Creates a download ticket for the original EML, including its MIME parts. Add `part=<attachment part>` to export just one attachment. Originals are capped at 96 MB. |
+| `GET /api/mcp/mail/chunk?ticket=<ticket>&file=<file>&index=0` | Binary chunk. Read indexes 0 through `chunks - 1` and concatenate the bytes in your connector, outside model context. |
+| `DELETE /api/mcp/mail/export?ticket=<ticket>` | Remove the temporary download after reading it. This does not modify the mailbox. |
+
+A compact message row's ID is `folder:uidValidity:uid`. For the initial copy, backfill using `before=<next>&uidValidity=<uidValidity>` until `hasMore` is false. Even an empty page can have `hasMore` when a UID range is sparse. Keep the initial `highWaterUid` as the starting point for new arrivals and use `after=<checkpoint>&uidValidity=<uidValidity>` to poll. When an incremental page has more, continue from its `next`. On the last page advance to its `highWaterUid`. If the API returns 409, rebuild that folder's index. New UID polling does not detect changes to flags on older messages or expunges. Reconcile metadata periodically if your index needs those changes.
+
+Store the full envelope or raw export in your MCP connector if required. Send only the matching subjects and body excerpts to the model. The mailbox feed performs no send, move, mark-read, or delete operations on IONOS.
+
+## Drag and drop and files up to 1 GB
+
+Drop files anywhere on Compose or use the paperclip. Regular attachments keep the 24 MB total limit. When private Cloudflare R2 storage is configured, choosing a file above that limit automatically uses a download link. You can also choose **Add download link** for smaller files. Link uploads support up to 1 GB total and retry a failed upload part once. Recipients receive download links that expire seven days after sending. Anyone with a link can download the file until it expires, so share it only with the intended recipients.
+
+To enable link uploads, create a **private R2 bucket** and a bucket-scoped token with object read and write access. Set `ATTACHMENT_STORAGE_BUCKET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY` in Netlify Production → Functions. Use a bucket CORS policy like this, replacing the origin if you host Inbox on another domain:
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://a2zemails.netlify.app"],
+    "AllowedMethods": ["PUT"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag"]
+  }
+]
+```
+
+Keep the bucket private. Enable lifecycle cleanup for incomplete multipart uploads. If you configure expiry for completed objects, allow at least seven days after sending and sufficient time for saved drafts. Link uploads go straight from the browser to R2. IONOS receives a small email with URLs, and Netlify Functions do not handle the 1 GB file bytes.

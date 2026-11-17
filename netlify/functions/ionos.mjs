@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { stagedAttachments, stagedFiles, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
+import { largeFileLinks,largeFileRefs,largeFilesEnabled } from '../../server/large-file-links.mjs';
 import { REQUEST_LIMIT } from '../../server/mail-attachments.mjs';
 import { mailboxPreferences } from '../../server/mail-preferences.mjs';
 import { createHighLevelLogin } from '../../server/ghl-sso.mjs';
@@ -57,7 +58,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  return async function handler(request) {
   const url = new URL(request.url);
   const action = url.searchParams.get('action');
-  if (action==='status' && request.method==='GET') return reply({live:enabled,ready,highLevelOrigins:highLevel?.origins||[],highLevelIssues:highLevelSetup?.issues||[]});
+  if (action==='status' && request.method==='GET') return reply({live:enabled,ready,highLevelOrigins:highLevel?.origins||[],highLevelIssues:highLevelSetup?.issues||[],largeFiles:enabled&&largeFilesEnabled(env)});
   if (!ready) return reply({error:'Hosted IONOS is unavailable. Check the deployment settings.'},503);
   const origin = request.headers.get('origin');
   if (origin && origin!==url.origin) return reply({error:'Invalid request origin.'},403);
@@ -95,6 +96,14 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     error:'Sign in to your IONOS mailbox again.',
     reason:session?.highLevel?'ghl_mailbox':'session_expired',
    },401);
+   if (['large-start','large-finish','large-abort'].includes(action)&&request.method==='POST') {
+    const input=await readInput(request,16000);
+    const storage=largeFileLinks(env,login.email);
+    if (action==='large-start') return reply(await storage.begin(input));
+    if (action==='large-finish') await storage.complete(input);
+    else await storage.abort(input);
+    return reply({ok:true});
+   }
    if (action==='upload' && request.method==='POST') {
     await uploadsFactory(login.email).upload(await readInput(request,UPLOAD_REQUEST_LIMIT));
     return reply({ok:true});
@@ -155,7 +164,9 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const staged=stagedFiles(input?.stagedAttachments);
     if (staged.length && input.attachments?.length) throw new TypeError('Use one attachment upload method per message.');
     const uploaded=staged.length ? await uploadsFactory(login.email).resolve(input.id?.slice(4),staged) : [];
-    const result=await mailbox.send(input,uploaded);
+    const large=largeFileRefs(input?.largeFiles);
+    const links=large.length ? await largeFileLinks(env,login.email).links(input.id?.slice(4),large) : [];
+    const result=await mailbox.send(input,uploaded,links);
     let draftCleanupFailed=false;
     if (input.savedDraft===true) {
      try { await preferencesFactory(login.email).discard(input.id.slice(4)); }
@@ -169,6 +180,9 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='update' && request.method==='POST') return reply(await mailbox.update(await readInput(request,4096)));
    return reply({error:'Unknown mailbox action.'},404);
   } catch(error) {
+   if (action?.startsWith('large-')) {
+    return reply({error:error instanceof TypeError?error.message:'Large file storage could not complete the upload. Try again.'},error instanceof TypeError?400:502);
+   }
    if (action?.startsWith('attachment')) {
     return reply({error:error instanceof TypeError?error.message:'Could not load the attachment. Try again.'},error instanceof TypeError?400:502);
    }

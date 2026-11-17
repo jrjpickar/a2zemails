@@ -371,3 +371,84 @@ test('MCP Command Center exposes only authenticated aggregate stats', async () =
  assert.deepEqual((await response.json()).stats,commandCenterStats(seed));
  assert.equal(reads,1);
 });
+
+test('mail feed paginates oldest/newest by stable UID and rejects stale folder generations', async () => {
+ const {createMailFeedHandler}=await import('../netlify/functions/mail-feed.mjs');
+ const token='separate-fixture-token-for-mail-data-123';
+ const uids=[1,5,6,12,18];
+ let reads=0;
+ class FakeImap {
+  async connect(){}
+  async getMailboxLock(folder,options){
+   assert.equal(folder,'INBOX');assert.equal(options.readOnly,true);
+   this.mailbox={uidValidity:9n,uidNext:19};return {release(){}};
+  }
+  async search(query){
+   const [lo,hi]=query.uid.split(':').map(Number);
+   return uids.filter(uid=>uid>=lo&&uid<=hi);
+  }
+  async fetchAll(ids,query){
+   reads++;
+   assert.equal(query.source,undefined);
+   return [...ids].reverse().map(uid=>({uid,flags:new Set(['\\Seen']),envelope:{subject:'Message '+uid}}));
+  }
+  close(){}
+ }
+ const handler=createMailFeedHandler({
+  A2Z_MODE:'live',MCP_MAIL_TOKEN:token,MCP_COMMAND_CENTER_TOKEN:'different-stats-token',
+  MCP_IONOS_EMAIL:env.IONOS_EMAIL,MCP_IONOS_PASSWORD:env.IONOS_PASSWORD,IONOS_ALLOWED_MAILBOXES:env.IONOS_EMAIL,
+ },{makeMailbox:config=>createIonosMailbox(config,{Imap:FakeImap,transport:()=>({})})});
+ const call=(query,auth=token)=>handler(new Request('https://test.example/api/mcp/mail/messages?'+query,{headers:{Authorization:'Bearer '+auth}}));
+ assert.equal((await call('','different-stats-token')).status,401);
+ const newer=await (await call('limit=2')).json();
+ assert.deepEqual(newer.rows.map(row=>row[0]),[18,12]);
+ assert.equal(newer.next,12);
+ assert.equal(newer.highWaterUid,18);
+ assert.equal(newer.uidValidity,'9');
+ assert.equal(newer.rows[0].length,newer.columns.length);
+ const older=await (await call('limit=2&before=12&uidValidity=9&view=full')).json();
+ assert.deepEqual(older.messages.map(message=>message.uid),[6,5]);
+ assert.equal(older.messages[0].id,'INBOX:9:6');
+ const incremental=await (await call('limit=2&after=5&uidValidity=9')).json();
+ assert.deepEqual(incremental.rows.map(row=>row[0]),[6,12]);
+ assert.equal(incremental.next,12);
+ const last=await (await call('limit=2&after=12&uidValidity=9')).json();
+ assert.deepEqual(last.rows.map(row=>row[0]),[18]);
+ assert.equal(last.hasMore,false);
+ assert.equal((await call('after=12')).status,400);
+ assert.equal((await call('after=12&uidValidity=7')).status,409);
+ assert.equal(reads,4);
+});
+
+test('large file links sign upload parts for 1 GB and send a time-limited private link', async () => {
+ const {largeFileLinks,LARGE_FILE_LIMIT}=await import('../server/large-file-links.mjs');
+ const draftId='0d8bac5c-d3f4-4fa5-ad0b-e967daee3afd';
+ const file={id:'12345678-1234-4321-8999-123456789012',name:'project set.pdf',size:LARGE_FILE_LIMIT};
+ const events=[];
+ const storage=largeFileLinks({
+  R2_ACCOUNT_ID:'a'.repeat(32),ATTACHMENT_STORAGE_BUCKET:'private-files',
+  R2_ACCESS_KEY_ID:'fixture key',R2_SECRET_ACCESS_KEY:'fixture secret',
+ },'fixture@example.com',{
+  client:{async send(command){
+   events.push(command);
+   if (command.constructor.name==='CreateMultipartUploadCommand') return {UploadId:'fixture-upload'};
+   if (command.constructor.name==='HeadObjectCommand') return {ContentLength:file.size};
+   return {};
+  }},
+  async sign(client,command,options){
+   events.push(command);
+   return 'https://r2.example/'+(command.input.PartNumber||'download')+'?expires='+options.expiresIn;
+  }
+ });
+ const {urls,partBytes,uploadId}=await storage.begin({draftId,file});
+ assert.equal(urls.length,64);
+ assert.equal(partBytes*urls.length,LARGE_FILE_LIMIT);
+ assert.equal(uploadId,'fixture-upload');
+ assert.ok(urls[0].endsWith('?expires=7200'));
+ await storage.complete({draftId,file,uploadId,etags:urls.map(()=>'"'+ 'a'.repeat(32)+'"')});
+ const completion=events.find(command=>command.constructor.name==='CompleteMultipartUploadCommand');
+ assert.equal(completion.input.MultipartUpload.Parts.at(-1).PartNumber,64);
+ const links=await storage.links(draftId,[file]);
+ assert.deepEqual(links,[{name:file.name,url:'https://r2.example/download?expires=604800'}]);
+ await assert.rejects(storage.begin({draftId,file:{...file,size:LARGE_FILE_LIMIT+1}}),/up to 1 GB/);
+});

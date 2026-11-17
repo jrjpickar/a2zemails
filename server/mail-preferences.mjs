@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {largeFileRefs} from './large-file-links.mjs';
 import {signatureImage} from './signature-image.mjs';
 import {forwardedReferences} from './ionos.mjs';
 import {stagedFiles} from './staged-attachments.mjs';
@@ -34,7 +35,7 @@ export function mailboxPreferences(email, store=getStore({name:'mail-preferences
   async saveDraft(input) {
    const blobKey=fileKey(input?.id);
    const draft={
-    id:input.id,identity:email,files:[],attachments:mailAttachments(input.attachments),stagedAttachments:stagedFiles(input.stagedAttachments),forwardedAttachments:forwardedReferences(input.forwardedAttachments),
+    id:input.id,identity:email,files:[],attachments:mailAttachments(input.attachments),stagedAttachments:stagedFiles(input.stagedAttachments),forwardedAttachments:forwardedReferences(input.forwardedAttachments),largeFiles:largeFileRefs(input.largeFiles),
     to:requiredText(input.to,2048),cc:requiredText(input.cc,2048),
     subject:requiredText(input.subject,500),body:requiredText(input.body,150000),
     includeSignature:input.includeSignature!==false,
