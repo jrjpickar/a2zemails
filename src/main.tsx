@@ -3,6 +3,7 @@ import React,{useEffect,useMemo,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {LayoutDashboard,ClipboardList,FolderKanban,Calculator,FileQuestion,HardHat,Receipt,Inbox,Send,FileText,Archive,Trash2,ShieldAlert,Plus,Search,SlidersHorizontal,PanelLeft,ChevronDown,ChevronLeft,Star,Paperclip,Reply,ReplyAll,Forward,MoreHorizontal,ArrowUpRight,Mail,Clock3,X,Check,Download,RotateCcw,MailOpen,Menu,ArrowRight,Moon,Palette,Settings2} from 'lucide-react';
 import {categories,projects,seed,classify,matchProject,searchMail,initialState,threadFor,rowActions,appendSignature,dashboardQueues} from './model.mjs';
+import {MessageText} from './message-text';
 import {RecipientInput,type Contact} from './recipient-input';
 import {hostedRequest,MailboxLogin} from './hosted';
 import './style.css';
@@ -158,10 +159,10 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
 
  function renderBody(message:Message) {
   const result=bodies[message.id];
-  if (!message.needsBody) return <div className="body">{message.body||'This email has no text body.'}</div>;
+  if (!message.needsBody) return <div className="body"><MessageText body={message.body}/></div>;
   if (result && 'error' in result) return <div className="body" role="status">{result.error} <button className="project-tag" onClick={()=>void loadBody(message).catch(()=>{})}>Retry</button></div>;
   if (!result) return <div className="body" role="status">Loading message from IONOS…</div>;
-  return <div className="body">{result.body||'This email has no text body.'}{result.truncated&&<p className="message-note">The text body is too long to display in full. Open this message in IONOS Webmail to read the rest.</p>}</div>;
+  return <div className="body"><MessageText body={result.body}/>{result.truncated&&<p className="message-note">The text body is too long to display in full. Open this message in IONOS Webmail to read the rest.</p>}</div>;
  }
 
  function go(next:string){setNav(next);setQuery('');setFilter('All mail');setProjectFilter('');setMarked([]);setMenu('');setMobileRead(false);setSide(false);setLimit(60)}

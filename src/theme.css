@@ -136,3 +136,9 @@ select, kbd, .project-tag, .gray, .attachments h3 span, .chips button { backgrou
 .recipient-options [role="option"] { display: grid; gap: 2px; padding: 7px 10px; cursor: pointer; overflow-wrap: anywhere; }
 .recipient-options [aria-selected="true"], .recipient-options [role="option"]:hover { background: var(--hover); color: var(--ink); }
 .message-note { margin-top: 12px; color: var(--muted); font-size: 12px; }
+.mail-text { display: grid; gap: 14px; }
+.mail-text-lines { white-space: pre-wrap; overflow-wrap: anywhere; }
+.mail-text a { color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; }
+.mail-quote { margin: 0; padding: 4px 0 4px 14px; border-left: 2px solid var(--strong-line); }
+.mail-quote-toggle > summary { width: fit-content; cursor: pointer; font-size: 12px; font-weight: 650; color: var(--muted); }
+.mail-quote-toggle[open] > summary { margin-bottom: 8px; }
