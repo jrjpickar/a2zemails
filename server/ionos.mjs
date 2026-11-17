@@ -50,6 +50,19 @@ function bidDue(subject, body) {
  return !Number.isNaN(candidate.getTime()) && candidate.toISOString().startsWith(match[1]) ? match[1] : undefined;
 }
 
+const detailLimit = 1024 * 1024;
+
+function messageLocation(id) {
+ return typeof id === 'string' && id.length <= 2048 && id.match(/^(.+):(\d+):([1-9]\d*)$/s);
+}
+
+function textParts(node) {
+ if (!node || node.disposition==='attachment' || node.dispositionParameters?.filename || node.parameters?.name) return [];
+ if (node.type?.startsWith('multipart/')) return (node.childNodes||[]).flatMap(textParts);
+ if (node.type==='text/plain' || node.type==='text/html') return [{type:node.type,part:node.part||'1'}];
+ return [];
+}
+
 export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, transport=nodemailer.createTransport}={}) {
  const smtp = transport(config.smtp);
  async function saveSent(message) {
@@ -112,11 +125,12 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
       const headerId = parsed?.messageId || envelope?.messageId || '';
       const references = mimeReferences(parsed,envelope);
       const subject = envelope?.subject || '(No subject)';
-      const body = (parsed?.text || (raw ? '' : 'Message body exceeds the local preview limit.')).slice(0,90000);
+      const body = (parsed?.text || '').slice(0,90000);
+      const needsBody = !parsed || (parsed.text?.length || 0)>90000 || (!body && Boolean(parsed.html));
       const category = classify(subject,body,from);
       mail.push({
        id, thread:references[0]||headerId||id, name:envelope?.from?.[0]?.name||from||'Unknown sender',
-       company:'', subject, body, date:item.internalDate?.toISOString()||new Date(0).toISOString(),
+       company:'', subject, body, needsBody, date:item.internalDate?.toISOString()||new Date(0).toISOString(),
        from,to:addressList(envelope?.to),cc:addressList(envelope?.cc),
        category,project:'',folder,unread:!item.flags.has('\\Seen'),star:item.flags.has('\\Flagged'),
        files:(parsed?.attachments||[]).map(file=>file.filename||'Attachment'),
@@ -134,6 +148,40 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   mail() {
    if (!fetching) fetching = readMail().finally(()=>{fetching=undefined});
    return fetching;
+  },
+  async body(id) {
+   const match = messageLocation(id);
+   if (!match) throw new TypeError('Invalid message.');
+   const [,path,generation,uid] = match;
+   const imap = new Imap(config.imap);
+   imap.on?.('error',()=>{});
+   try {
+    await imap.connect();
+    const lock = await imap.getMailboxLock(path,{readOnly:true});
+    try {
+     if (String(imap.mailbox.uidValidity)!==generation) return null;
+     const message = await imap.fetchOne(uid,{bodyStructure:true},{uid:true});
+     if (!message) return null;
+     if (!message.bodyStructure) throw new Error('IONOS did not return a message structure.');
+     const parts = textParts(message.bodyStructure).sort((a,b)=>Number(a.type==='text/html')-Number(b.type==='text/html'));
+     for (const {part,type} of parts.slice(0,4)) {
+      const {content} = await imap.download(uid,part,{uid:true,maxBytes:detailLimit+1});
+      if (!content) continue;
+      const chunks=[];
+      let size=0;
+      for await (const chunk of content) { chunks.push(chunk); size+=chunk.length; }
+      const raw = Buffer.concat(chunks).subarray(0,detailLimit);
+      let body = raw.toString('utf8');
+      if (type==='text/html') {
+       const mime = 'Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n'+raw.toString('base64');
+       const parsed = await parser(mime,{skipHtmlToText:false,skipImageLinks:true});
+       body = parsed.text||'';
+      }
+      if (body.trim() || size>detailLimit) return {body,truncated:size>detailLimit};
+     }
+     return {body:'',truncated:false};
+    } finally {lock.release();}
+   } finally {imap.close();}
   },
   async update(input) {
    const match = typeof input?.id==='string' && input.id.match(/^(.+):(\d+):(\d+)$/s);

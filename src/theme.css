@@ -135,3 +135,4 @@ select, kbd, .project-tag, .gray, .attachments h3 span, .chips button { backgrou
 .recipient-options { position: absolute; z-index: 2; inset: 100% 0 auto; display: grid; background: var(--surface); border: 1px solid var(--strong-line); border-radius: 8px; box-shadow: 0 8px 22px #0005; max-height: 180px; overflow: auto; }
 .recipient-options [role="option"] { display: grid; gap: 2px; padding: 7px 10px; cursor: pointer; overflow-wrap: anywhere; }
 .recipient-options [aria-selected="true"], .recipient-options [role="option"]:hover { background: var(--hover); color: var(--ink); }
+.message-note { margin-top: 12px; color: var(--muted); font-size: 12px; }

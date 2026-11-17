@@ -75,6 +75,11 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (!login || !allowed.has(login.email)) return reply({error:'Sign in to your IONOS mailbox again.'},401);
    const mailbox = mailboxFactory(configFor(login));
    if (action==='mail' && request.method==='GET') return reply(await mailbox.mail());
+   if (action==='body' && request.method==='POST') {
+    const input = await readInput(request,8192);
+    const result = await mailbox.body(input?.id);
+    return result ? reply(result) : reply({error:'The message is no longer in this folder. Refresh the mailbox and try again.'},404);
+   }
    if (action==='send' && request.method==='POST') return reply(await mailbox.send(await readInput(request,256000)));
    if (action==='update' && request.method==='POST') return reply(await mailbox.update(await readInput(request,4096)));
    return reply({error:'Unknown mailbox action.'},404);

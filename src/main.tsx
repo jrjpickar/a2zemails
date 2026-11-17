@@ -7,7 +7,7 @@ import {RecipientInput,type Contact} from './recipient-input';
 import {hostedRequest,MailboxLogin} from './hosted';
 import './style.css';
 import './theme.css';
-type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;files:string[];due?:string;from:string;to:string;cc:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
+type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;needsBody?:boolean;files:string[];due?:string;from:string;to:string;cc:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
 type Draft={id:string;to:string;cc:string;subject:string;body:string;files:string[];thread?:string;parent?:Message;identity:string;includeSignature?:boolean};
 type State={mail:Message[];rules:Record<string,string>;drafts:Draft[];signatures?:Record<string,string>};
 const samples=seed as Message[];
@@ -129,6 +129,41 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
  const currentRow=row&&list.some(m=>m.id===row.id)?row:undefined;
  const related=currentRow?threadFor(mail,currentRow) as Message[]:[];
  const newest=related.filter(m=>m.id!==currentRow?.id);
+ const [bodies,setBodies]=useState<Record<string,{body:string;truncated:boolean}|{error:string}>>({});
+ const bodyRequests=React.useRef(new Map<string,Promise<{body:string;truncated:boolean}>>());
+
+ function loadBody(message:Message) {
+  const cached=bodies[message.id];
+  if (cached && 'body' in cached) return Promise.resolve(cached);
+  const existing=bodyRequests.current.get(message.id);
+  if (existing) return existing;
+  if (cached) setBodies(previous=>{
+   const next={...previous};
+   delete next[message.id];
+   return next;
+  });
+  const pending=liveRequest('body',{id:message.id}).then((result:{body:string;truncated:boolean})=>{
+   setBodies(previous=>({...previous,[message.id]:result}));
+   return result;
+  }).catch(error=>{
+   setBodies(previous=>({...previous,[message.id]:{error:error instanceof Error?error.message:'Could not load the message.'}}));
+   throw error;
+  }).finally(()=>bodyRequests.current.delete(message.id));
+  bodyRequests.current.set(message.id,pending);
+  return pending;
+ }
+ useEffect(()=>{
+  if (currentRow?.needsBody) void loadBody(currentRow).catch(()=>{});
+ },[currentRow?.id,currentRow?.needsBody]);
+
+ function renderBody(message:Message) {
+  const result=bodies[message.id];
+  if (!message.needsBody) return <div className="body">{message.body||'This email has no text body.'}</div>;
+  if (result && 'error' in result) return <div className="body" role="status">{result.error} <button className="project-tag" onClick={()=>void loadBody(message).catch(()=>{})}>Retry</button></div>;
+  if (!result) return <div className="body" role="status">Loading message from IONOS…</div>;
+  return <div className="body">{result.body||'This email has no text body.'}{result.truncated&&<p className="message-note">The text body is too long to display in full. Open this message in IONOS Webmail to read the rest.</p>}</div>;
+ }
+
  function go(next:string){setNav(next);setQuery('');setFilter('All mail');setProjectFilter('');setMarked([]);setMenu('');setMobileRead(false);setSide(false);setLimit(60)}
  async function change(ids:string[],patch:Partial<Message>) {
   if (liveToken) {
@@ -153,6 +188,19 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
  }
  function start(mode='new',m?:Message){
   if(liveToken&&!account)return;
+  if (mode==='Forward' && m?.needsBody) {
+   const result=bodies[m.id];
+   if (!result || 'error' in result) {
+    void loadBody(m).catch(()=>{});
+    setToast('Wait for the message to load before forwarding.');
+    return;
+   }
+   if (result.truncated) {
+    setToast('Open this message in IONOS Webmail to forward the complete text.');
+    return;
+   }
+   m={...m,body:result.body};
+  }
   const d:Draft={id:crypto.randomUUID(),to:m&&mode!=='Forward'?m.from:'',cc:mode==='Reply all'&&m?[m.to,m.cc].join(', ').split(',').map(s=>s.trim()).filter(s=>s&&!senderIdentities.includes(s)&&s!==m.from).join(', '):'',subject:m?(mode==='Forward'?'Fwd: ':'Re: ')+m.subject.replace(/^(Re: |Fwd: )+/i,''):'',body:mode==='Forward'&&m?'\n\n---------- Forwarded message ----------\nFrom: '+m.from+'\nSubject: '+m.subject+'\n\n'+m.body:'',files:!liveToken&&mode==='Forward'&&m?[...m.files]:[],thread:mode==='Forward'?undefined:m?.thread,parent:mode==='Forward'?undefined:m,identity:account||demo,includeSignature:true};
   setState(s=>({...s,drafts:[...s.drafts,d]}));setCompose(d.id);setMenu('');
  }
@@ -256,10 +304,10 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
  <div className="reader-scroll"><div className="reader-content"><div className="subject-line"><h2>{currentRow.subject}</h2><button className={'star '+(currentRow.star?'starred':'')} disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Toggle message star" onClick={()=>change([currentRow.id],{star:!currentRow.star})}><Star size={20}/></button></div><div className="reader-tags">{tag(currentRow)}{project&&<button className="project-tag" onClick={()=>{go('Active Projects');setProjectFilter(project.id)}}><FolderKanban size={13}/>{project.name}</button>}</div>
  <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}</small></div><time>{time(currentRow.date)}</time></div>
  {currentRow.due&&<div className="deadline"><div className="deadline-icon"><Clock3 size={19}/></div><div><b>Bid submission deadline</b><span>{day(currentRow.due+'T12:00:00')}</span></div><span className="tag gold">Open bid</span></div>}
- <div className="body">{currentRow.body}</div>
+ {renderBody(currentRow)}
  {!liveToken&&currentRow.files.length>0&&<div className="attachments"><h3><Paperclip size={15}/> Attachments <span>{currentRow.files.length}</span></h3><div>{currentRow.files.map((f,i)=><button key={i} onClick={()=>setPreview(f)}><span className="file-icon"><FileText size={19}/></span><span><b>{f}</b><small>Sandbox attachment</small></span><Download size={16}/></button>)}</div></div>}
  <div className="reply-actions">{([[Reply,'Reply'],[ReplyAll,'Reply all'],[Forward,'Forward']] as const).map(([Icon,label])=><button key={label} onClick={()=>start(label,currentRow)}><Icon size={16}/>{label}</button>)}</div>
- {newest.length>0&&<section className="thread"><h3>Conversation · {related.length} messages</h3>{newest.map(m=><details key={m.id}><summary>{m.name} · {time(m.date)}</summary><p>{m.body}</p>{!liveToken&&m.files.map(f=><button key={f} onClick={()=>setPreview(f)}>{f}</button>)}</details>)}</section>}
+ {newest.length>0&&<section className="thread"><h3>Conversation · {related.length} messages</h3>{newest.map(m=><details key={m.id} onToggle={e=>{if(e.currentTarget.open&&m.needsBody&&!bodies[m.id])void loadBody(m).catch(()=>{})}}><summary>{m.name} · {time(m.date)}</summary>{renderBody(m)}{!liveToken&&m.files.map(f=><button key={f} onClick={()=>setPreview(f)}>{f}</button>)}</details>)}</section>}
  <div className="metadata" hidden={!!liveToken}><label>Project<select value={currentRow.project} onChange={e=>{change([currentRow.id],{project:e.target.value});setToast('Project assignment saved')}}><option value="">Unassigned</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><label>Category<select value={currentRow.category} onChange={e=>{change([currentRow.id],{category:e.target.value});setToast('Category corrected')}}>{categories.map(c=><option key={c}>{c}</option>)}</select></label><button onClick={()=>{const domain=currentRow.from.split('@')[1];setState(s=>({...s,rules:{...s.rules,[domain]:currentRow.category}}));setToast('Rule saved for future messages from '+domain)}}>Remember sender domain rule</button></div>
  </div></div></>:<div className="reader-empty"><Inbox size={29}/><h2>Select a message</h2><p>Open a conversation to read it here.</p></div>}</section>
  </div>}

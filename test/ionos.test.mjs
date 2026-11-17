@@ -120,3 +120,53 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
  assert.equal(response.headers.get('cache-control'),'no-store');
  assert.equal((await response.json()).email,env.IONOS_EMAIL);
 });
+
+test('opening a large IONOS email fetches only its readable MIME body', async () => {
+ const {Readable}=await import('node:stream');
+ const calls=[];
+ const bodyStructure={type:'multipart/mixed',childNodes:[
+  {type:'multipart/alternative',part:'1',childNodes:[
+   {type:'text/plain',part:'1.1'}, {type:'text/html',part:'1.2'},
+  ]},
+  {type:'application/pdf',part:'2',disposition:'attachment'},
+  {type:'text/plain',part:'3',disposition:'attachment'},
+ ]};
+ class FakeImap {
+  async connect() {}
+  async list() { return [{path:'INBOX',flags:new Set()}]; }
+  async getMailboxLock(path,options) {
+   assert.equal(path,'INBOX');
+   assert.equal(options.readOnly,true);
+   this.mailbox={exists:1,uidValidity:22n};
+   return {release() {}};
+  }
+  async fetchAll(range,query) {
+   assert.equal(query.source,undefined,'mail list must not download the 20 MB message');
+   return [{uid:4,size:20_000_000,flags:new Set(),envelope:{subject:'Plans attached'}}];
+  }
+  async fetchOne(uid,query,options) {
+   assert.equal(uid,'4');
+   assert.equal(query.bodyStructure,true);
+   assert.equal(options.uid,true);
+   return {bodyStructure};
+  }
+  async download(uid,part,options) {
+   calls.push(part);
+   assert.equal(options.uid,true);
+   assert.equal(options.maxBytes,1024*1024+1);
+   const body=part==='1.1'?'  ':'<p>Use the <strong>revised plans</strong>.</p><img src="https://example.com/pixel">';
+   return {content:Readable.from([Buffer.from(body)])};
+  }
+  close() {}
+ }
+ const mailbox=createIonosMailbox(ionosConfig(env),{Imap:FakeImap,transport:()=>({})});
+ const {mail}=await mailbox.mail();
+ assert.equal(mail[0].body,'');
+ assert.equal(mail[0].needsBody,true);
+ const detail=await mailbox.body(mail[0].id);
+ assert.match(detail.body,/Use the revised plans\./);
+ assert.doesNotMatch(detail.body,/<img|<strong>/);
+ assert.equal(detail.truncated,false);
+ assert.deepEqual(calls,['1.1','1.2']);
+ assert.equal(await mailbox.body('INBOX:21:4'),null);
+});

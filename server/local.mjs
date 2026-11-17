@@ -46,6 +46,11 @@ const server = createServer(async(req,res)=>{
   if (path.startsWith('/api/ionos/')) {
    if (!authorized(req)) return json(res,403,{error:'Reload the local IONOS app to start a session.'});
    if (path==='/api/ionos/mail' && req.method==='GET') return json(res,200,await mailbox.mail());
+   if (path==='/api/ionos/body' && req.method==='POST' && req.headers['content-type']==='application/json') {
+    const input = await readJson(req);
+    const result = await mailbox.body(input?.id);
+    return result ? json(res,200,result) : json(res,404,{error:'The message is no longer in this folder. Refresh the mailbox and try again.'});
+   }
    if (path==='/api/ionos/update' && req.method==='POST' && req.headers['content-type']==='application/json') {
     return json(res,200,await mailbox.update(await readJson(req)));
    }
