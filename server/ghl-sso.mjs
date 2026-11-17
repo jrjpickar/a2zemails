@@ -21,7 +21,7 @@ export function highLevelContext(payload, secret) {
 }
 
 export function createHighLevelLogin(env, allowed) {
- const secret=env.GHL_APP_SHARED_SECRET;
+ const secret=env.GHL_APP_SHARED_SECRET?.trim();
  const companyId=env.GHL_COMPANY_ID?.trim();
  const locations=new Set((env.GHL_LOCATION_IDS||'').split(',').map(value=>value.trim()).filter(Boolean));
  const origins=new Set(['https://app.gohighlevel.com']);
@@ -53,11 +53,14 @@ export function createHighLevelLogin(env, allowed) {
  return {
   origins:[...origins],
   verify(payload,origin) {
-   if (!origins.has(origin)) return null;
+   if (!origins.has(origin)) return {failure:'ghl_origin'};
    const context=highLevelContext(payload,secret);
+   if (!context || typeof context.userId!=='string' || !context.userId) return {failure:'ghl_context'};
+   if (context.companyId!==companyId) return {failure:'ghl_agency'};
+   if (!locations.has(context.activeLocation)) return {failure:'ghl_location'};
    const credentials=getCredentials(context);
-   if (!credentials) return null;
-   return {email:credentials.email,userId:context.userId,companyId:context.companyId,activeLocation:context.activeLocation};
+   if (!credentials) return {failure:'ghl_mailbox'};
+   return {identity:{email:credentials.email,userId:context.userId,companyId:context.companyId,activeLocation:context.activeLocation}};
   },
   getCredentials,
  };

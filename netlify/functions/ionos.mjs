@@ -3,6 +3,7 @@ import { createHighLevelLogin } from '../../server/ghl-sso.mjs';
 import { ImapFlow } from 'imapflow';
 import { createIonosMailbox, ionosConfig } from '../../server/ionos.mjs';
 
+const mailboxSignInError = 'Could not sign in. Use your full IONOS mailbox address and mailbox password. A2Z must also enable the mailbox for direct sign-in.';
 const lifetime = 2 * 60 * 60 * 1000;
 const headers = {'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
 const reply = (body,status=200) => Response.json(body,{status,headers});
@@ -65,7 +66,8 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const email = typeof input?.email==='string' ? input.email.trim().toLowerCase() : '';
     const password = input?.password;
     if (!allowed.has(email) || typeof password!=='string' || !password || password.length>1024) {
-     return reply({error:'IONOS sign-in failed. Check your mailbox credentials and account access.'},401);
+     console.warn('[IONOS] Direct sign-in rejected by mailbox access or input checks.');
+     return reply({error:mailboxSignInError},401);
     }
     const client = new Imap(configFor({email,password}).imap);
     client.on('error',()=>{});
@@ -75,9 +77,12 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    }
    if (action==='ghl-login' && request.method==='POST') {
     const input=await readInput(request,26000);
-    const identity=highLevel?.verify(input?.encryptedData,input?.parentOrigin);
-    if (!identity) return reply({error:'Automatic sign-in is unavailable for this HighLevel account.'},401);
-    return reply({token:encrypt(key,{highLevel:identity}),email:identity.email});
+    const result=highLevel?.verify(input?.encryptedData,input?.parentOrigin);
+    if (!result?.identity) return reply({
+     error:'Automatic sign-in is unavailable for this HighLevel account.',
+     reason:result?.failure||'ghl_setup',
+    },401);
+    return reply({token:encrypt(key,{highLevel:result.identity}),email:result.identity.email});
    }
    const session = decrypt(key,request.headers.get('authorization'));
    const login = session?.highLevel ? highLevel?.getCredentials(session.highLevel) : session;
@@ -95,7 +100,8 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
   } catch(error) {
    if (error instanceof TypeError) return reply({error:'Check your mailbox settings or message fields.'},400);
    if (error.authenticationFailed || error.code==='EAUTH' || error.serverResponseCode==='AUTHENTICATIONFAILED') {
-    return reply({error:'IONOS sign-in failed. Check your mailbox credentials and account access.'},401);
+    if (action==='login') console.warn('[IONOS] Direct sign-in credentials rejected by the mail server.');
+    return reply({error:mailboxSignInError},401);
    }
    return reply({error:action==='send'
     ? 'IONOS did not confirm delivery. Check Sent before retrying.'

@@ -11,7 +11,7 @@ export async function hostedRequest(action:string, body?:object, token?:string) 
  const data = await response.json();
  if (!response.ok||data.error) {
   const error=new Error(data.error||'IONOS request failed.');
-  Object.assign(error,{status:response.status});
+  Object.assign(error,{status:response.status,reason:data.reason});
   throw error;
  }
  return data;
@@ -20,6 +20,7 @@ export async function hostedRequest(action:string, body?:object, token?:string) 
 export function MailboxLogin({ready,onLogin,notice,retry}:{ready:boolean;onLogin:(token:string)=>void;notice?:string;retry?:()=>void}) {
  const [busy,setBusy]=useState(false);
  const [error,setError]=useState('');
+ const [showPassword,setShowPassword]=useState(false);
  async function signIn(event:FormEvent<HTMLFormElement>) {
   event.preventDefault();
   if (busy||!ready) return;
@@ -35,6 +36,7 @@ export function MailboxLogin({ready,onLogin,notice,retry}:{ready:boolean;onLogin
   } finally {
    const password=form.elements.namedItem('password') as HTMLInputElement;
    password.value='';
+   setShowPassword(false);
    setBusy(false);
   }
  }
@@ -45,31 +47,66 @@ export function MailboxLogin({ready,onLogin,notice,retry}:{ready:boolean;onLogin
    {notice&&<p role="status">{notice}</p>}
    {retry&&<button type="button" className="project-tag" onClick={retry}>Try HighLevel sign-in again</button>}
    <label>IONOS email address<input name="email" type="email" autoComplete="username" inputMode="email" autoCapitalize="none" autoCorrect="off" spellCheck={false} required disabled={!ready||busy}/></label>
-   <label>Mailbox password<input name="password" type="password" autoComplete="current-password" required disabled={!ready||busy}/></label>
+   <label htmlFor="mailbox-password">Mailbox password</label>
+   <div className="mailbox-password-field">
+    <input id="mailbox-password" name="password" type={showPassword?'text':'password'} autoComplete="current-password"
+     autoCapitalize="none" autoCorrect="off" spellCheck={false} required disabled={!ready||busy}/>
+    <button type="button" className="project-tag" aria-pressed={showPassword} disabled={!ready||busy}
+     onClick={()=>setShowPassword(value=>!value)}>{showPassword?'Hide password':'Show password'}</button>
+   </div>
    {(!ready||error)&&<p role="alert">{error||'This deployment needs a session secret and allowed mailbox addresses.'}</p>}
    <button className="send" disabled={!ready||busy}>{busy?'Signing in…':'Sign in'}</button>
   </div>
  </form></div>;
 }
 
+const highLevelNotices:Record<string,string> = {
+ ghl_origin:'This HighLevel host isn’t enabled for auto sign-in. Check GHL_PARENT_ORIGINS.',
+ ghl_context:'Inbox couldn’t read the HighLevel session. Check the Shared Secret for this exact Marketplace app.',
+ ghl_agency:'This HighLevel agency doesn’t match GHL_COMPANY_ID.',
+ ghl_location:'Open Inbox inside an approved HighLevel sub-account. Check GHL_LOCATION_IDS.',
+ ghl_mailbox:'This HighLevel user has no matching IONOS mailbox configured for auto sign-in.',
+ ghl_setup:'HighLevel auto sign-in is not configured on this deployment.',
+ ghl_timeout:'HighLevel did not send a user session. Open Inbox from the installed Marketplace Custom Page and check the portal hostname.',
+};
+
+export function highLevelSignInNotice(error:unknown) {
+ const reason=(error as {reason?:string}|null)?.reason;
+ const detail=reason && Object.hasOwn(highLevelNotices,reason) ? highLevelNotices[reason] : 'Inbox couldn’t complete HighLevel sign-in.';
+ return detail+' You can still sign in with your IONOS mailbox.';
+}
+
 export function requestHighLevelContext(origins:string[],signal:AbortSignal) {
  return new Promise<{encryptedData:string;parentOrigin:string}>((resolve,reject)=>{
+  const frames=new Set([window.parent,window.top].filter(Boolean));
+  const retryTimers:number[]=[];
   function cleanup() {
    window.clearTimeout(timer);
+   retryTimers.forEach(id=>window.clearTimeout(id));
    window.removeEventListener('message',receive);
    signal.removeEventListener('abort',abort);
   }
   function abort() {cleanup();reject(new Error('HighLevel sign-in was interrupted.'));}
   function receive(event:MessageEvent) {
-   if (event.source!==window.parent || !origins.includes(event.origin) ||
+   if (!frames.has(event.source as Window) || !origins.includes(event.origin) ||
        event.data?.message!=='REQUEST_USER_DATA_RESPONSE' || typeof event.data.payload!=='string') return;
    cleanup();
    resolve({encryptedData:event.data.payload,parentOrigin:event.origin});
   }
-  const timer=window.setTimeout(()=>{cleanup();reject(new Error('HighLevel did not provide a sign-in session.'));},4000);
+  function send() {
+   for (const frame of frames) {
+    if (!frame || frame===window) continue;
+    for (const origin of origins) frame.postMessage({message:'REQUEST_USER_DATA'},origin);
+   }
+  }
+  const timer=window.setTimeout(()=>{
+   cleanup();
+   reject(Object.assign(new Error('HighLevel did not provide a sign-in session.'),{reason:'ghl_timeout'}));
+  },6000);
   if (signal.aborted) {abort();return;}
   window.addEventListener('message',receive);
   signal.addEventListener('abort',abort,{once:true});
-  for (const origin of origins) window.parent.postMessage({message:'REQUEST_USER_DATA'},origin);
+  send();
+  for (const delay of [400,1500,3000]) retryTimers.push(window.setTimeout(send,delay));
  });
 }

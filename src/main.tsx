@@ -6,7 +6,7 @@ import {categories,projects,seed,classify,matchProject,searchMail,initialState,t
 import {RichMail,type MailBody} from './rich-mail';
 import {MessageText} from './message-text';
 import {RecipientInput,type Contact} from './recipient-input';
-import {hostedRequest,MailboxLogin,requestHighLevelContext} from './hosted';
+import {hostedRequest,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
 import './style.css';
 import './theme.css';
 type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;needsBody?:boolean;files:string[];due?:string;from:string;to:string;cc:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
@@ -378,7 +378,7 @@ function HostedInbox({ready,highLevelOrigins}:{ready:boolean;highLevelOrigins:st
   requestHighLevelContext(highLevelOrigins,controller.signal)
    .then(context=>hostedRequest('ghl-login',context))
    .then(result=>{if(!controller.signal.aborted)setToken(result.token)})
-   .catch(()=>{if(!controller.signal.aborted)setNotice('HighLevel automatic sign-in is unavailable. You can sign in with your IONOS mailbox.')})
+   .catch(error=>{if(!controller.signal.aborted)setNotice(highLevelSignInNotice(error))})
    .finally(()=>{if(!controller.signal.aborted)setChecking(false)});
   return ()=>controller.abort();
  },[attempt,highLevelOrigins]);

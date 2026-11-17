@@ -200,3 +200,6 @@ select, kbd, .project-tag, .gray, .attachments h3 span, .chips button { backgrou
  .topbar button { padding-inline:5px; }
  .topbar .demo-pill svg { display:none; }
 }
+
+.mailbox-password-field { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:stretch; }
+.mailbox-password-field input { width:100%; min-width:0; }
