@@ -76,3 +76,14 @@ export function dashboardQueues(mail) {
   invoices: incoming.filter(message => message.category === 'Invoices' && message.unread).sort(newestFirst),
  };
 }
+
+export function commandCenterStats(mail) {
+ const queues=dashboardQueues(mail);
+ return {
+  unreadIncoming:mail.filter(message=>message.folder==='Inbox'&&message.unread).length,
+  bidInvitations:queues.bids.length,
+  urgentUnread:queues.urgent.length,
+  awaitingReply:queues.unanswered.length,
+  unreadInvoiceMail:queues.invoices.length,
+ };
+}

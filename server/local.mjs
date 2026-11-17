@@ -38,7 +38,7 @@ const server = createServer(async(req,res)=>{
  res.setHeader('Cache-Control','no-store');
  res.setHeader('X-Content-Type-Options','nosniff');
  res.setHeader('Referrer-Policy','no-referrer');
- res.setHeader('Content-Security-Policy',"default-src 'self'; img-src 'self' data: https:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+ res.setHeader('Content-Security-Policy',"default-src 'self'; img-src 'self' data: blob: https:; frame-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
  if (req.headers.host!==host || (req.headers.origin && req.headers.origin!==origin)) {
   return json(res,403,{error:'The IONOS server is available on this computer only.'});
  }
@@ -51,6 +51,11 @@ const server = createServer(async(req,res)=>{
     const input = await readJson(req);
     const result = await mailbox.body(input?.id);
     return result ? json(res,200,result) : json(res,404,{error:'The message is no longer in this folder. Refresh the mailbox and try again.'});
+   }
+   if (path==='/api/ionos/attachment' && req.method==='POST' && req.headers['content-type']==='application/json') {
+    const input=await readJson(req);
+    const file=await mailbox.attachment(input?.id,input?.part);
+    return file ? json(res,200,{type:file.type,name:file.name,data:file.content.toString('base64')}) : json(res,404,{error:'This attachment is no longer available.'});
    }
    if (path==='/api/ionos/update' && req.method==='POST' && req.headers['content-type']==='application/json') {
     return json(res,200,await mailbox.update(await readJson(req)));

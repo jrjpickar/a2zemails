@@ -33,6 +33,22 @@ export function stagedAttachments(email,store=getStore({name:'mail-uploads',cons
  const prefix=draft=>account+'/'+checkedId(draft)+'/';
  const partKey=(draft,file,index)=>prefix(draft)+file+'/'+index;
  return {
+  async saveFile(draft,file,content) {
+   const count=Math.ceil(content.length/CHUNK_BYTES);
+   for (let start=0;start<count;start+=4) {
+    await Promise.all(Array.from({length:Math.min(4,count-start)},(_,offset)=>{
+     const index=start+offset;
+     const part=content.subarray(index*CHUNK_BYTES,(index+1)*CHUNK_BYTES);
+     return store.set(partKey(draft,checkedId(file),index),part.buffer.slice(part.byteOffset,part.byteOffset+part.byteLength));
+    }));
+   }
+   return count;
+  },
+  async readChunk(draft,file,index) {
+   if (!Number.isInteger(index)||index<0||index>=Math.ceil(MAX_STAGED_BYTES/CHUNK_BYTES)) throw new TypeError('Invalid attachment chunk.');
+   const data=await store.get(partKey(draft,checkedId(file),index),{type:'arrayBuffer'});
+   return data&&Buffer.from(data);
+  },
   async upload(input) {
    const file=stagedFiles([input?.file])[0];
    const index=input.index;

@@ -1,6 +1,8 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import nodemailer from 'nodemailer';
+import { safeRasterType,signatureImage } from './signature-image.mjs';
+import { MAX_STAGED_BYTES } from './staged-attachments.mjs';
 import { mailAttachments } from './mail-attachments.mjs';
 import { classify } from '../src/model.mjs';
 
@@ -72,6 +74,34 @@ function relatedImages(node) {
  if (node.type?.startsWith('multipart/')) return (node.childNodes||[]).flatMap(relatedImages);
  if (!node.part || !node.id || !inlineImageTypes.has(node.type)) return [];
  return [{...node,cid:node.id.replace(/^<|>$/g,'').toLowerCase()}];
+}
+
+function attachedFiles(node) {
+ if (!node) return [];
+ if (node.type?.startsWith('multipart/')) return (node.childNodes||[]).flatMap(attachedFiles);
+ const name=node.dispositionParameters?.filename||node.parameters?.name;
+ if (!name && node.disposition!=='attachment' && node.type!=='message/rfc822') return [];
+ if (node.id && node.disposition!=='attachment' && inlineImageTypes.has(node.type)) return [];
+ return [{part:node.part||'1',name:String(name||'Attachment').replace(/[\x00-\x1f\x7f/\\]/g,'_').slice(0,180),
+  type:node.type||'application/octet-stream',size:Number(node.size)||0}];
+}
+
+function previewType(file,content) {
+ if ((file.type==='application/pdf'||/\.pdf$/i.test(file.name)) && content.subarray(0,5).toString()==='%PDF-') return 'application/pdf';
+ const raster=safeRasterType(content);
+ return raster || 'application/octet-stream';
+}
+
+export function forwardedReferences(input) {
+ if (input===undefined) return [];
+ if (!Array.isArray(input)||input.length>10) throw new TypeError('Forward up to 10 attachments.');
+ return input.map(file=>{
+  if (!messageLocation(file?.messageId)||typeof file.part!=='string'||!/^\d+(?:\.\d+)*$/.test(file.part)||file.part.length>64) {
+   throw new TypeError('Invalid forwarded attachment.');
+  }
+  const name=typeof file.name==='string'?file.name.slice(0,180):'Attachment';
+  return {messageId:file.messageId,part:file.part,name};
+ });
 }
 
 async function readPart(imap,uid,part,limit) {
@@ -152,12 +182,13 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
       const body = (parsed?.text || '').slice(0,90000);
       const needsBody = !parsed || (parsed.text?.length || 0)>90000 || Boolean(parsed.html) || textParts(item.bodyStructure).some(part=>part.type==='text/html');
       const category = classify(subject,body,from);
+      const attachments = attachedFiles(item.bodyStructure);
       mail.push({
        id, thread:references[0]||headerId||id, name:envelope?.from?.[0]?.name||from||'Unknown sender',
        company:'', subject, body, needsBody, date:item.internalDate?.toISOString()||new Date(0).toISOString(),
        from,to:addressList(envelope?.to),cc:addressList(envelope?.cc),
        category,project:'',folder,unread:!item.flags.has('\\Seen'),star:item.flags.has('\\Flagged'),
-       files:(parsed?.attachments||[]).map(file=>file.filename||'Attachment'),
+       files:attachments.length?attachments.map(file=>file.name):(parsed?.attachments||[]).map(file=>file.filename||'Attachment'),attachments,
        due:category==='Bid Invitations'?bidDue(subject,body):undefined,
        headers:{messageId:headerId,references},
       });
@@ -168,7 +199,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   } finally { imap.close(); }
  }
 
- return {
+ const mailbox = {
   mail() {
    if (!fetching) fetching = readMail().finally(()=>{fetching=undefined});
    return fetching;
@@ -229,6 +260,28 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     } finally {lock.release();}
    } finally {imap.close();}
   },
+  async attachment(id,part,limit=MAX_STAGED_BYTES) {
+   const match=messageLocation(id);
+   if (!match || typeof part!=='string' || part.length>64 || !/^\d+(?:\.\d+)*$/.test(part)) throw new TypeError('Invalid attachment.');
+   const [,path,generation,uid]=match;
+   const imap=new Imap(config.imap);
+   imap.on?.('error',()=>{});
+   try {
+    await imap.connect();
+    const lock=await imap.getMailboxLock(path,{readOnly:true});
+    try {
+     if (String(imap.mailbox.uidValidity)!==generation) return null;
+     const message=await imap.fetchOne(uid,{bodyStructure:true},{uid:true});
+     const file=attachedFiles(message?.bodyStructure).find(item=>item.part===part);
+     if (!file) return null;
+     if (limit<=0) throw new TypeError('Attachments must total 24 MB or less.');
+     const result=await readPart(imap,uid,part,limit);
+     if (!result) return null;
+     if (result.truncated) throw new TypeError('Attachments must total 24 MB or less.');
+     return {name:file.name,type:previewType(file,result.raw),content:result.raw};
+    } finally {lock.release();}
+   } finally {imap.close();}
+  },
   async update(input) {
    const match = typeof input?.id==='string' && input.id.match(/^(.+):(\d+):(\d+)$/s);
    const patches = {read:'\\Seen',unread:'\\Seen',star:'\\Flagged',unstar:'\\Flagged'};
@@ -272,8 +325,22 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    const attachments=mailAttachments(input.attachments).map(file=>({
     filename:file.name,content:Buffer.from(file.data,'base64'),
    }));
+   const sources=forwardedReferences(input.forwardedAttachments);
+   if (attachments.length+uploaded.length+sources.length>10) throw new TypeError('Attach up to 10 files.');
+   let total=[...attachments,...uploaded].reduce((sum,file)=>sum+file.content.length,0);
+   for (const source of sources) {
+    const forwarded=await mailbox.attachment(source.messageId,source.part,MAX_STAGED_BYTES-total);
+    if (!forwarded) throw new TypeError('An original attachment moved or is unavailable. Refresh and forward the message again.');
+    total+=forwarded.content.length;
+    attachments.push({filename:forwarded.name,content:forwarded.content});
+   }
+   const inline=signatureImage(input.signatureImage);
+   const cid='a2z-signature-'+id+'@'+config.email.split('@')[1];
+   const escaped=body.replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+   const html=inline ? '<div style="white-space:pre-wrap">'+escaped+'</div><p><img src="cid:'+cid+'" alt="Email signature" style="max-width:320px;height:auto"></p>' : undefined;
+   if (inline) attachments.push({filename:'signature.'+inline.type.split('/')[1],content:inline.content,contentType:inline.type,cid});
    const message = {
-    from:config.email,to,cc,subject,text:body,attachments:[...attachments,...uploaded],
+    from:config.email,to,cc,subject,text:body,html,attachments:[...attachments,...uploaded],
     messageId:'<'+id+'@'+config.email.split('@')[1]+'>',
     references:refs,inReplyTo:refs.at(-1),disableFileAccess:true,disableUrlAccess:true,
    };
@@ -282,4 +349,5 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    return {messageId:result.messageId,rejected:result.rejected||[],sentSaved};
   },
  };
+ return mailbox;
 }

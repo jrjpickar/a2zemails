@@ -4,18 +4,19 @@ import {createRoot} from 'react-dom/client';
 import {LayoutDashboard,ClipboardList,FolderKanban,Calculator,FileQuestion,HardHat,Receipt,Inbox,Send,FileText,Archive,Trash2,ShieldAlert,Plus,Search,SlidersHorizontal,PanelLeft,ChevronDown,ChevronLeft,Star,Paperclip,Reply,ReplyAll,Forward,MoreHorizontal,ArrowUpRight,Mail,Clock3,X,Check,Download,RotateCcw,MailOpen,Menu,ArrowRight,Moon,Palette,Settings2} from 'lucide-react';
 import {categories,projects,seed,classify,matchProject,searchMail,initialState,threadFor,rowActions,appendSignature,dashboardQueues} from './model.mjs';
 import {RichMail,type MailBody} from './rich-mail';
+import {AttachmentPreview,type MailAttachment,type ForwardedAttachment} from './attachment-preview';
 import {useComposePosition} from './compose-position';
 import {MessageText} from './message-text';
 import {RecipientInput,type Contact} from './recipient-input';
 import {hostedEndpoint,hostedRequest,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
 import './style.css';
 import './theme.css';
-type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;needsBody?:boolean;files:string[];due?:string;from:string;to:string;cc:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
+type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
 type Upload={name:string;data:string;size?:number};
 type StagedUpload={id:string;name:string;size:number};
 type SavedDraft={id:string;to:string;subject:string;updatedAt:string};
-type Draft={id:string;to:string;cc:string;subject:string;body:string;files:string[];thread?:string;parent?:Pick<Message,'project'|'headers'>;identity:string;includeSignature?:boolean;attachments?:Upload[];stagedAttachments?:StagedUpload[]};
-type State={mail:Message[];rules:Record<string,string>;drafts:Draft[];signatures?:Record<string,string>};
+type Draft={id:string;to:string;cc:string;subject:string;body:string;files:string[];thread?:string;parent?:Pick<Message,'project'|'headers'>;identity:string;includeSignature?:boolean;attachments?:Upload[];stagedAttachments?:StagedUpload[];forwardedAttachments?:ForwardedAttachment[]};
+type State={mail:Message[];rules:Record<string,string>;drafts:Draft[];signatures?:Record<string,string>;signatureImages?:Record<string,string>};
 const samples=seed as Message[];
 const demo='operations@a2z.example';
 const identities=[demo,'estimating@a2z.example'];
@@ -74,11 +75,12 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
    throw error;
   }
  }
- const [state,setState]=useState<State>(()=>getState(liveToken)),[nav,setNav]=useState('Inbox'),[selected,setSelected]=useState('mail-0'),[query,setQuery]=useState(''),[filter,setFilter]=useState('All mail'),[projectFilter,setProjectFilter]=useState(''),[marked,setMarked]=useState<string[]>([]),[compose,setCompose]=useState<string|null>(null),[preview,setPreview]=useState<string|null>(null),[toast,setToast]=useState(''),[menu,setMenu]=useState(''),[mobileRead,setMobileRead]=useState(false),[side,setSide]=useState(false),[help,setHelp]=useState(false),[limit,setLimit]=useState(60);
+ const [state,setState]=useState<State>(()=>getState(liveToken)),[nav,setNav]=useState('Inbox'),[selected,setSelected]=useState('mail-0'),[query,setQuery]=useState(''),[filter,setFilter]=useState('All mail'),[projectFilter,setProjectFilter]=useState(''),[marked,setMarked]=useState<string[]>([]),[compose,setCompose]=useState<string|null>(null),[preview,setPreview]=useState<string|null>(null),[livePreview,setLivePreview]=useState<{id:string;file:MailAttachment}|null>(null),[toast,setToast]=useState(''),[menu,setMenu]=useState(''),[mobileRead,setMobileRead]=useState(false),[side,setSide]=useState(false),[help,setHelp]=useState(false),[limit,setLimit]=useState(60);
  const [theme,setTheme]=useState(() => {
   try { return localStorage.getItem('a2z-theme')==='color'?'color':'dark'; }
   catch { return 'dark'; }
  });
+ const [signatureImageForm,setSignatureImageForm]=useState<Record<string,string>>({});
  const [signatureForm,setSignatureForm]=useState<Record<string,string>|null>(null);
  const [account,setAccount]=useState('');
  const [connection,setConnection]=useState(liveToken?'Connecting to IONOS…':'');
@@ -129,10 +131,10 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
   if (!hosted||!account) return;
   const version=++prefsVersion.current;
   try {
-   const data:{drafts:SavedDraft[];signature:string|null}=await liveRequest('preferences');
+   const data:{drafts:SavedDraft[];signature:string|null;signatureImage?:string|null}=await liveRequest('preferences');
    if (prefsVersion.current!==version) return;
    setSavedDrafts(data.drafts);
-   if (data.signature!==null) setState(previous=>({...previous,signatures:{...previous.signatures,[account]:data.signature as string}}));
+   if (data.signature!==null) setState(previous=>({...previous,signatures:{...previous.signatures,[account]:data.signature as string},signatureImages:{...previous.signatureImages,[account]:data.signatureImage||''}}));
    setDraftSyncError('');
   } catch(error) {
    if (prefsVersion.current===version) setDraftSyncError(error instanceof Error?error.message:'Could not load saved drafts.');
@@ -145,7 +147,7 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
  const composeWindow=useComposePosition(draft?.id);
  const draftPayload=draft?JSON.stringify(draft):'';
  const hasDraftContent=Boolean(draft&&(draft.to||draft.cc||draft.subject||draft.body||draft.files.length||
-  draft.attachments?.length||draft.stagedAttachments?.length));
+  draft.attachments?.length||draft.stagedAttachments?.length||draft.forwardedAttachments?.length));
 
  async function persistDraft(current:Draft) {
   const payload=JSON.stringify(current);
@@ -283,7 +285,7 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
    }
    m={...m,body:result.body};
   }
-  const d:Draft={id:crypto.randomUUID(),to:m&&mode!=='Forward'?m.from:'',cc:mode==='Reply all'&&m?[m.to,m.cc].join(', ').split(',').map(s=>s.trim()).filter(s=>s&&!senderIdentities.includes(s)&&s!==m.from).join(', '):'',subject:m?(mode==='Forward'?'Fwd: ':'Re: ')+m.subject.replace(/^(Re: |Fwd: )+/i,''):'',body:mode==='Forward'&&m?'\n\n---------- Forwarded message ----------\nFrom: '+m.from+'\nSubject: '+m.subject+'\n\n'+m.body:'',files:!liveToken&&mode==='Forward'&&m?[...m.files]:[],thread:mode==='Forward'?undefined:m?.thread,parent:mode==='Forward'||!m?undefined:{headers:m.headers,project:m.project},identity:account||demo,includeSignature:true};
+  const d:Draft={id:crypto.randomUUID(),to:m&&mode!=='Forward'?m.from:'',cc:mode==='Reply all'&&m?[m.to,m.cc].join(', ').split(',').map(s=>s.trim()).filter(s=>s&&!senderIdentities.includes(s)&&s!==m.from).join(', '):'',subject:m?(mode==='Forward'?'Fwd: ':'Re: ')+m.subject.replace(/^(Re: |Fwd: )+/i,''):'',body:mode==='Forward'&&m?'\n\n---------- Forwarded message ----------\nFrom: '+m.from+'\nSubject: '+m.subject+'\n\n'+m.body:'',files:!liveToken&&mode==='Forward'&&m?[...m.files]:[],forwardedAttachments:liveToken&&mode==='Forward'&&m?m.attachments?.map(file=>({messageId:m.id,part:file.part,name:file.name})):undefined,thread:mode==='Forward'?undefined:m?.thread,parent:mode==='Forward'||!m?undefined:{headers:m.headers,project:m.project},identity:account||demo,includeSignature:true};
   setDraftSaveState('');
   setState(s=>({...s,drafts:[...s.drafts,d]}));setCompose(d.id);setMenu('');
  }
@@ -298,7 +300,7 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
  }
  function closeDraft() {
   if (!draft||writing.current||sendingRef.current) return;
-  if (!draft.to&&!draft.cc&&!draft.subject&&!draft.body&&!draft.files.length&&!draft.attachments?.length&&!draft.stagedAttachments?.length) {
+  if (!draft.to&&!draft.cc&&!draft.subject&&!draft.body&&!draft.files.length&&!draft.attachments?.length&&!draft.stagedAttachments?.length&&!draft.forwardedAttachments?.length) {
    setState(previous=>({...previous,drafts:previous.drafts.filter(item=>item.id!==draft.id)}));
    setCompose(null);
    return;
@@ -337,6 +339,7 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
   });
  }
  function openSignatures() {
+  setSignatureImageForm({...state.signatureImages});
   setSignatureForm(Object.fromEntries(senderIdentities.map(identity=>[identity,signatureFor(identity)])));
   setMenu('');
  }
@@ -346,10 +349,10 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
   void performSave(async()=>{
    if (hosted) {
     ++prefsVersion.current;
-    await liveRequest('signature',{signature:signatureForm[account]});
+    await liveRequest('signature',{signature:signatureForm[account],image:signatureImageForm[account]||null});
    }
    const signatures={...state.signatures,...signatureForm};
-   setState(previous=>({...previous,signatures}));
+   setState(previous=>({...previous,signatures,signatureImages:signatureImageForm}));
    if (liveToken&&!hosted) localStorage.setItem(liveSignatureKey,JSON.stringify(signatures));
    setSignatureForm(null);
    setToast('Email signature saved');
@@ -372,7 +375,7 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
   const bytes=staged.reduce((sum,file)=>sum+file.size,0)+inline.reduce((sum,file)=>
    sum+(file.size??Math.floor(file.data.length*3/4)-(file.data.endsWith('==')?2:file.data.endsWith('=')?1:0)),0);
   const max=hosted?24:3;
-  if (files.length+inline.length+staged.length>10 || files.some(file=>!file.size || file.name.length>180) ||
+  if (files.length+inline.length+staged.length+(draft.forwardedAttachments?.length||0)>10 || files.some(file=>!file.size || file.name.length>180) ||
       bytes+files.reduce((sum,file)=>sum+file.size,0)>max*1024*1024) {
    setToast('Choose up to 10 non-empty files totaling '+max+' MB or less.');
    return;
@@ -423,7 +426,7 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
    setSending(true);
    try {
     await autoSave.current;
-    const result=await liveRequest('send',{to:draft.to,cc:draft.cc,subject:draft.subject,body,references,id,attachments:draft.attachments,stagedAttachments:draft.stagedAttachments,savedDraft:hosted});
+    const result=await liveRequest('send',{to:draft.to,cc:draft.cc,subject:draft.subject,body,references,id,attachments:draft.attachments,stagedAttachments:draft.stagedAttachments,forwardedAttachments:draft.forwardedAttachments,signatureImage:draft.includeSignature===false?undefined:state.signatureImages?.[draft.identity],savedDraft:hosted});
     messageId=result.messageId;
     rejected=result.rejected;
     sentSaved=result.sentSaved;
@@ -436,7 +439,7 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
     setSending(false);
    }
   }
-  const m:Message={id,thread:draft.thread||id,name:'A2Z Construction Services',company:'A2Z',subject:draft.subject,date:new Date().toISOString(),body,files:[...draft.files,...(draft.attachments||[]).map(file=>file.name),...(draft.stagedAttachments||[]).map(file=>file.name)],from:draft.identity,to:draft.to,cc:draft.cc,category:classify(draft.subject,draft.body,draft.identity,state.rules),project:draft.parent?.project||matchProject(draft.subject+' '+draft.body),folder:'Sent',unread:false,star:false,headers:{messageId,references}};
+  const m:Message={id,thread:draft.thread||id,name:'A2Z Construction Services',company:'A2Z',subject:draft.subject,date:new Date().toISOString(),body,files:[...draft.files,...(draft.attachments||[]).map(file=>file.name),...(draft.stagedAttachments||[]).map(file=>file.name),...(draft.forwardedAttachments||[]).map(file=>file.name)],from:draft.identity,to:draft.to,cc:draft.cc,category:classify(draft.subject,draft.body,draft.identity,state.rules),project:draft.parent?.project||matchProject(draft.subject+' '+draft.body),folder:'Sent',unread:false,star:false,headers:{messageId,references}};
   if (!draftCleanupFailed) {
    ++prefsVersion.current;
    setSavedDrafts(previous=>previous.filter(item=>item.id!==draft.id));
@@ -449,7 +452,7 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
   else {setState(getState());setToast('Sandbox inbox refreshed');}
  }
  function receive(){const id=crypto.randomUUID(),s=samples[2];const subject='NTP — Riverside Warehouse field mobilization';const m:Message={...s,id,thread:id,subject,date:new Date().toISOString(),body:'Notice to proceed is approved. Please confirm the mobilization window with field operations.',category:classify(subject,'',s.from,state.rules),project:matchProject(subject),unread:true,star:false,files:[],headers:{messageId:'<'+id+'@a2z.example>',references:[]}};setState(s=>({...s,mail:[m,...s.mail]}));go('Inbox');setToast('Sample email received')}
- useEffect(()=>{function key(e:KeyboardEvent){if(e.key==='Escape'){if(preview)setPreview(null);else if(signatureForm&&!saving)setSignatureForm(null);else if(compose&&!sending&&!saving)closeDraft();else if(help)setHelp(false);else {setMenu('');setMobileRead(false)}return}const editable=(e.target instanceof HTMLElement ? e.target : document.body).closest('input,textarea,select,[contenteditable="true"]');
+ useEffect(()=>{function key(e:KeyboardEvent){if(e.key==='Escape'){if(livePreview)setLivePreview(null);else if(preview)setPreview(null);else if(signatureForm&&!saving)setSignatureForm(null);else if(compose&&!sending&&!saving)closeDraft();else if(help)setHelp(false);else {setMenu('');setMobileRead(false)}return}const editable=(e.target instanceof HTMLElement ? e.target : document.body).closest('input,textarea,select,[contenteditable="true"]');
   if(e.metaKey&&!e.ctrlKey&&!e.altKey){
    const letter=e.key.toLowerCase();
    if(letter==='r'&&e.shiftKey){
@@ -457,17 +460,38 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
     refreshCurrentView();
     return;
    }
-   if(!e.shiftKey&&!editable&&!compose&&!preview&&!help&&!signatureForm&&currentRow&&['r','f'].includes(letter)){
+   if(!e.shiftKey&&!editable&&!compose&&!preview&&!livePreview&&!help&&!signatureForm&&currentRow&&['r','f'].includes(letter)){
     e.preventDefault();
     start(letter==='r'?'Reply':'Forward',currentRow);
    }
    return;
   }
-  if((e.target instanceof HTMLElement ? e.target : document.body).matches('input,textarea,select,button')||e.metaKey||e.ctrlKey||e.altKey||compose||preview||help||signatureForm)return;
+  if((e.target instanceof HTMLElement ? e.target : document.body).matches('input,textarea,select,button')||e.metaKey||e.ctrlKey||e.altKey||compose||preview||livePreview||help||signatureForm)return;
  if(e.key==='c'){e.preventDefault();start()}if(e.key==='/'){e.preventDefault();document.getElementById('search')?.focus()}if(e.key==='?')setHelp(true);if(e.key==='e'&&currentRow)move([currentRow.id],'Archive');
  }document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key)});
  const tag=(m:Message)=><span className={'tag '+tones[m.category]}>{tags[m.category]}</span>;
  const project=projects.find(p=>p.id===currentRow?.project);
+ function renderAttachments(message:Message) {
+  if (!message.attachments?.length) return null;
+  return <div className="attachments"><h3><Paperclip size={15}/> Attachments <span>{message.attachments.length}</span></h3>
+   <div>{message.attachments.map(file=><button type="button" key={file.part} onClick={()=>setLivePreview({id:message.id,file})}>
+    <span className="file-icon"><FileText size={19}/></span><span><b>{file.name}</b><small>Preview or download</small></span><Download size={16}/>
+   </button>)}</div>
+  </div>;
+ }
+ async function pickSignatureImage(identity:string,event:React.ChangeEvent<HTMLInputElement>) {
+  const file=event.currentTarget.files?.[0];
+  event.currentTarget.value='';
+  if (!file) return;
+  if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)||file.size>256*1024||!file.size) {
+   setToast('Choose a PNG, JPEG, GIF, or WebP under 256 KB.');
+   return;
+  }
+  try {
+   const data=await encodeFile(file);
+   setSignatureImageForm(previous=>({...previous,[identity]:'data:'+file.type+';base64,'+data}));
+  } catch {setToast('Could not read the signature image.');}
+ }
  function replyButtons(message:Message) {
   return ([[Reply,'Reply'],[ReplyAll,'Reply all'],[Forward,'Forward']] as const).map(([Icon,label])=>
    <button key={label} onClick={()=>start(label,message)}><Icon size={18}/>{label}</button>);
@@ -538,9 +562,10 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
  <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}</small></div><time>{time(currentRow.date)}</time></div>
  {currentRow.due&&<div className="deadline"><div className="deadline-icon"><Clock3 size={19}/></div><div><b>Bid submission deadline</b><span>{day(currentRow.due+'T12:00:00')}</span></div><span className="tag gold">Open bid</span></div>}
  {renderBody(currentRow)}
+ {liveToken&&renderAttachments(currentRow)}
  {!liveToken&&currentRow.files.length>0&&<div className="attachments"><h3><Paperclip size={15}/> Attachments <span>{currentRow.files.length}</span></h3><div>{currentRow.files.map((f,i)=><button key={i} onClick={()=>setPreview(f)}><span className="file-icon"><FileText size={19}/></span><span><b>{f}</b><small>Sandbox attachment</small></span><Download size={16}/></button>)}</div></div>}
  <div className="reply-actions desktop-replies">{replyButtons(currentRow)}</div>
- {newest.length>0&&<section className="thread"><h3>Conversation · {related.length} messages</h3>{newest.map(m=><details key={m.id} onToggle={e=>{if(e.currentTarget.open&&m.needsBody&&!bodies[m.id])void loadBody(m).catch(()=>{})}}><summary>{m.name} · {time(m.date)}</summary>{renderBody(m)}{!liveToken&&m.files.map(f=><button key={f} onClick={()=>setPreview(f)}>{f}</button>)}</details>)}</section>}
+ {newest.length>0&&<section className="thread"><h3>Conversation · {related.length} messages</h3>{newest.map(m=><details key={m.id} onToggle={e=>{if(e.currentTarget.open&&m.needsBody&&!bodies[m.id])void loadBody(m).catch(()=>{})}}><summary>{m.name} · {time(m.date)}</summary>{renderBody(m)}{liveToken&&renderAttachments(m)}{!liveToken&&m.files.map(f=><button key={f} onClick={()=>setPreview(f)}>{f}</button>)}</details>)}</section>}
  <div className="metadata" hidden={!!liveToken}><label>Project<select value={currentRow.project} onChange={e=>{change([currentRow.id],{project:e.target.value});setToast('Project assignment saved')}}><option value="">Unassigned</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><label>Category<select value={currentRow.category} onChange={e=>{change([currentRow.id],{category:e.target.value});setToast('Category corrected')}}>{categories.map(c=><option key={c}>{c}</option>)}</select></label><button onClick={()=>{const domain=currentRow.from.split('@')[1];setState(s=>({...s,rules:{...s.rules,[domain]:currentRow.category}}));setToast('Rule saved for future messages from '+domain)}}>Remember sender domain rule</button></div>
  </div></div><nav className="mobile-dock mobile-replies" aria-label="Message actions">{replyButtons(currentRow)}</nav></>:<div className="reader-empty"><Inbox size={29}/><h2>Select a message</h2><p>Open a conversation to read it here.</p></div>}</section>
  </div>}
@@ -551,7 +576,8 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
   <button className="mobile-compose" disabled={!!liveToken&&!account} onClick={()=>start()}><Plus size={19}/>Compose</button>
  </nav>}
  </main>
- {draft&&<div className="modal-back compose-overlay" onClick={closeDraft}><form ref={composeWindow.panel} style={composeWindow.position||undefined} className={"compose-panel"+(composeWindow.position?" compose-positioned":"")} role="dialog" aria-label="Compose message" aria-modal="true" onClick={e=>e.stopPropagation()} onSubmit={sendDraft}><header className="compose-titlebar" onPointerDown={composeWindow.begin} onPointerMove={composeWindow.move} onPointerUp={composeWindow.end} onLostPointerCapture={composeWindow.end} onDoubleClick={event=>{if(!(event.target as HTMLElement).closest("button"))composeWindow.reset()}}><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending||saving} onClick={closeDraft}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label><textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}</div><button type="button" className="project-tag" disabled={sending||saving} onClick={openSignatures}>Edit signature</button></div>{draft.files.length>0&&<div className="chips">{draft.files.map((f,i)=><button type="button" key={i} onClick={()=>edit({files:draft.files.filter((_,j)=>j!==i)})}>{f} ×</button>)}</div>}{draft.stagedAttachments?.length?<div className="chips">{draft.stagedAttachments.map(file=><button type="button" key={file.id} disabled={saving||sending} onClick={()=>edit({stagedAttachments:draft.stagedAttachments?.filter(item=>item.id!==file.id)})}>{file.name} ×</button>)}</div>:null}
+ {draft&&<div className="modal-back compose-overlay" onClick={closeDraft}><form ref={composeWindow.panel} style={composeWindow.position||undefined} className={"compose-panel"+(composeWindow.position?" compose-positioned":"")} role="dialog" aria-label="Compose message" aria-modal="true" onClick={e=>e.stopPropagation()} onSubmit={sendDraft}><header className="compose-titlebar" onPointerDown={composeWindow.begin} onPointerMove={composeWindow.move} onPointerUp={composeWindow.end} onLostPointerCapture={composeWindow.end} onDoubleClick={event=>{if(!(event.target as HTMLElement).closest("button"))composeWindow.reset()}}><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending||saving} onClick={closeDraft}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label><textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}{draft.includeSignature!==false&&state.signatureImages?.[draft.identity]&&<img className="signature-logo" alt="Signature" src={state.signatureImages[draft.identity]}/>}</div><button type="button" className="project-tag" disabled={sending||saving} onClick={openSignatures}>Edit signature</button></div>{draft.files.length>0&&<div className="chips">{draft.files.map((f,i)=><button type="button" key={i} onClick={()=>edit({files:draft.files.filter((_,j)=>j!==i)})}>{f} ×</button>)}</div>}{draft.forwardedAttachments?.length?<div className="chips">{draft.forwardedAttachments.map(file=><button type="button" key={file.messageId+file.part} disabled={saving||sending} onClick={()=>edit({forwardedAttachments:draft.forwardedAttachments?.filter(item=>item!==file)})}>{file.name} ×</button>)}</div>:null}
+ {draft.stagedAttachments?.length?<div className="chips">{draft.stagedAttachments.map(file=><button type="button" key={file.id} disabled={saving||sending} onClick={()=>edit({stagedAttachments:draft.stagedAttachments?.filter(item=>item.id!==file.id)})}>{file.name} ×</button>)}</div>:null}
  {draft.attachments?.length?<div className="chips">{draft.attachments.map((file,index)=><button type="button" key={index} disabled={saving||sending} onClick={()=>edit({attachments:draft.attachments?.filter((_,i)=>i!==index)})}>{file.name} ×</button>)}</div>:null}
  <footer>
   {uploadProgress&&<span className="upload-progress" role="status">{uploadProgress}</span>}
@@ -566,10 +592,15 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
  <form className="signature-settings" role="dialog" aria-label="Email signatures" onClick={e=>e.stopPropagation()} onSubmit={saveSignatures}>
   <header><b>Email signatures</b><button type="button" className="icon" title="Close signatures" disabled={saving} onClick={()=>setSignatureForm(null)}><X size={19}/></button></header>
   <div className="signature-fields"><p>Set a plain text signature for each sender. Leave it blank to omit it.</p>
-   {senderIdentities.map(identity=><label key={identity}>{identity}<textarea maxLength={2000} value={signatureForm[identity]} onChange={e=>setSignatureForm({...signatureForm,[identity]:e.target.value})}/></label>)}
+   {senderIdentities.map(identity=><div className="signature-editor-fields" key={identity}>
+    <label>{identity}<textarea maxLength={2000} value={signatureForm[identity]} onChange={e=>setSignatureForm({...signatureForm,[identity]:e.target.value})}/></label>
+    {signatureImageForm[identity]&&<><img className="signature-logo" alt="Signature image" src={signatureImageForm[identity]}/><button type="button" className="project-tag" onClick={()=>setSignatureImageForm(previous=>({...previous,[identity]:''}))}>Remove image</button></>}
+    <label>Signature image <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" disabled={saving} onChange={event=>void pickSignatureImage(identity,event)}/></label>
+   </div>)}
    <button type="submit" className="send" disabled={saving}>{saving?'Saving…':'Save signature'}</button>
   </div>
  </form></div>}
+ {livePreview&&<AttachmentPreview key={livePreview.id+livePreview.file.part} id={livePreview.id} file={livePreview.file} hosted={hosted} request={liveRequest} close={()=>setLivePreview(null)}/>}
  {preview&&<div className="modal-back centered" onClick={()=>setPreview(null)}><section className="attachment-preview" role="dialog" aria-label="Attachment preview" onClick={e=>e.stopPropagation()}><header><b>{preview}</b><button className="icon" title="Close preview" onClick={()=>setPreview(null)}><X size={19}/></button></header><div className="preview-sheet"><div className="eyebrow">A2Z CONSTRUCTION SERVICES / DEMO DOCUMENT</div><FileText size={42}/><h2>{preview.replace(/\.pdf$/i,'')}</h2><p>This is a simulated attachment for the sandbox.</p></div><footer><a href="/samples/demo.pdf" download={preview}><Download size={16}/> Download sample PDF</a></footer></section></div>}
  {help&&<div className="modal-back centered" onClick={()=>setHelp(false)}><section className="shortcuts" role="dialog" aria-label="Keyboard shortcuts" onClick={e=>e.stopPropagation()}><header><b>Keyboard shortcuts</b><button className="icon" title="Close shortcuts" onClick={()=>setHelp(false)}><X size={19}/></button></header>{[['C','Compose'],['/','Search'],['⌘R','Reply'],['⌘⇧R','Refresh mailbox'],['⌘F','Forward'],['E','Archive selected message'],['Esc','Close dialog or message'],['?','Show shortcuts']].map(([k,l])=><p key={k}><kbd>{k}</kbd> {l}</p>)}</section></div>}
  {toast&&<div className="toast" role="status"><Check size={17}/>{toast}</div>}

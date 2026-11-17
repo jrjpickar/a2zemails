@@ -248,17 +248,19 @@ test('saved drafts keep attachments and signatures under the authenticated mailb
  const id='0d8bac5c-d3f4-4fa5-ad0b-e967daee3afd';
  const attachments=[{name:'plans.txt',data:Buffer.from('test plans').toString('base64')}];
  await first.saveDraft({id,to:'gc@example.com',cc:'',subject:'Revised plans',body:'Draft message',attachments,identity:'two@example.com'});
- await first.saveSignature('Operations\nA2Z Construction');
+ const logo='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+ await first.saveSignature('Operations\nA2Z Construction',logo);
  await second.saveSignature('');
  const firstSummary=await first.load();
  assert.equal(firstSummary.signature,'Operations\nA2Z Construction');
+ assert.equal(firstSummary.signatureImage,logo);
  assert.equal(firstSummary.drafts[0].subject,'Revised plans');
  assert.equal(firstSummary.drafts[0].attachments,undefined);
  const opened=await first.loadDraft(id);
  assert.deepEqual(opened.attachments,attachments);
  assert.equal(opened.identity,'one@example.com');
  assert.equal(await second.loadDraft(id),null);
- assert.deepEqual(await second.load(),{drafts:[],signature:''});
+ assert.deepEqual(await second.load(),{drafts:[],signature:'',signatureImage:null});
  await first.discard(id);
  assert.deepEqual((await first.load()).drafts,[]);
  assert.equal((await first.load()).signature,'Operations\nA2Z Construction');
@@ -303,4 +305,69 @@ test('HighLevel status identifies malformed mailbox configuration without return
  assert.deepEqual(status.highLevelOrigins,[]);
  assert.deepEqual(status.highLevelIssues,['GHL_IONOS_MAILBOX_PASSWORDS is not valid JSON']);
  assert.doesNotMatch(JSON.stringify(status),/fixture|first@example/);
+});
+
+test('a live PDF can be opened and forwarded unchanged with a CID signature image', async () => {
+ const {Readable}=await import('node:stream');
+ const bytes=Buffer.from('%PDF-1.7\nfixture PDF');
+ const bodyStructure={type:'multipart/mixed',childNodes:[
+  {type:'text/plain',part:'1'},
+  {type:'application/pdf',part:'2',disposition:'attachment',dispositionParameters:{filename:'plans.pdf'},size:24},
+  {type:'image/png',part:'3',id:'embedded-logo',parameters:{name:'logo.png'}},
+ ]};
+ let sent;
+ class FakeImap {
+  async connect(){}
+  async list(){return [{path:'INBOX',flags:new Set()}];}
+  async getMailboxLock(){this.mailbox={exists:1,uidValidity:22n};return {release(){}};}
+  async fetchAll(){return [{uid:4,size:25_000_000,flags:new Set(),envelope:{subject:'Plans'},bodyStructure}];}
+  async fetchOne(){return {bodyStructure};}
+  async download(uid,part){
+   assert.equal(uid,'4');
+   assert.equal(part,'2');
+   return {content:Readable.from([bytes])};
+  }
+  close(){}
+ }
+ const mailbox=createIonosMailbox(ionosConfig(env),{
+  Imap:FakeImap,transport:()=>({async sendMail(message){sent=message;return {messageId:message.messageId,rejected:[]};}}),
+ });
+ const {mail}=await mailbox.mail();
+ assert.deepEqual(mail[0].attachments.map(file=>file.name),['plans.pdf']);
+ const fetched=await mailbox.attachment(mail[0].id,'2');
+ assert.equal(fetched.type,'application/pdf');
+ assert.deepEqual(fetched.content,bytes);
+ assert.equal(await mailbox.attachment(mail[0].id,'1'),null);
+ assert.equal(await mailbox.attachment('INBOX:21:4','2'),null);
+ await mailbox.send({
+  id:'out-12345678-1234-1234-1234-123456789012',to:'gc@builder.example',cc:'',
+  subject:'Fwd: Plans',body:'See <plans> & notes.',forwardedAttachments:[{messageId:mail[0].id,part:'2',name:'ignored.pdf'}],
+  signatureImage:'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+ });
+ const [file,logo]=sent.attachments;
+ assert.equal(file.filename,'plans.pdf');
+ assert.deepEqual(file.content,bytes);
+ assert.equal(logo.contentType,'image/gif');
+ assert.ok(sent.html.includes('cid:'+logo.cid));
+ assert.match(sent.html,/See &lt;plans&gt; &amp; notes/);
+});
+
+test('MCP Command Center exposes only authenticated aggregate stats', async () => {
+ const {createCommandCenterHandler}=await import('../netlify/functions/command-center.mjs');
+ const {commandCenterStats}=await import('../src/model.mjs');
+ const token='test-only-a2z-command-center-reference-key';
+ let reads=0;
+ const handler=createCommandCenterHandler({
+  A2Z_MODE:'live',MCP_COMMAND_CENTER_TOKEN:token,MCP_IONOS_EMAIL:env.IONOS_EMAIL,
+  MCP_IONOS_PASSWORD:env.IONOS_PASSWORD,IONOS_ALLOWED_MAILBOXES:env.IONOS_EMAIL,
+ },()=>({async mail(){reads++;return {mail:seed};}}));
+ const request=(method='GET',authorization)=>new Request('https://test.example/api/mcp/command-center',{
+  method,headers:authorization?{Authorization:authorization}:{},
+ });
+ assert.equal((await handler(request())).status,401);
+ assert.equal((await handler(request('POST','Bearer '+token))).status,405);
+ const response=await handler(request('GET','Bearer '+token));
+ assert.equal(response.status,200);
+ assert.deepEqual((await response.json()).stats,commandCenterStats(seed));
+ assert.equal(reads,1);
 });

@@ -1,4 +1,6 @@
 import {createHash} from 'node:crypto';
+import {signatureImage} from './signature-image.mjs';
+import {forwardedReferences} from './ionos.mjs';
 import {stagedFiles} from './staged-attachments.mjs';
 import {mailAttachments} from './mail-attachments.mjs';
 import {getStore} from '@netlify/blobs';
@@ -26,13 +28,13 @@ export function mailboxPreferences(email, store=getStore({name:'mail-preferences
     const current=await Promise.all(blobs.slice(start,start+12).map(({key:blobKey})=>store.getMetadata(blobKey)));
     for (const entry of current) if (entry?.metadata?.id) drafts.push(entry.metadata);
    }
-   return {signature,drafts:drafts.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt))};
+   return {signature:typeof signature==='string'?signature:signature?.text??null,signatureImage:signature?.image??null,drafts:drafts.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt))};
   },
   async loadDraft(id) {return await store.get(fileKey(id),{type:'json'});},
   async saveDraft(input) {
    const blobKey=fileKey(input?.id);
    const draft={
-    id:input.id,identity:email,files:[],attachments:mailAttachments(input.attachments),stagedAttachments:stagedFiles(input.stagedAttachments),
+    id:input.id,identity:email,files:[],attachments:mailAttachments(input.attachments),stagedAttachments:stagedFiles(input.stagedAttachments),forwardedAttachments:forwardedReferences(input.forwardedAttachments),
     to:requiredText(input.to,2048),cc:requiredText(input.cc,2048),
     subject:requiredText(input.subject,500),body:requiredText(input.body,150000),
     includeSignature:input.includeSignature!==false,
@@ -58,8 +60,9 @@ export function mailboxPreferences(email, store=getStore({name:'mail-preferences
    await store.setJSON(blobKey,draft,{metadata:{id,to,subject,updatedAt}});
   },
   async discard(id) {await store.delete(fileKey(id));},
-  async saveSignature(signature) {
-   await store.setJSON(key+'/signature',requiredText(signature,2000));
+  async saveSignature(signature,image) {
+   const text=requiredText(signature,2000);
+   await store.setJSON(key+'/signature',{text,image:signatureImage(image)?.url??null});
   },
  };
 }

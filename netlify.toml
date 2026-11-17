@@ -11,4 +11,4 @@ for = "/*"
 [headers.values]
 X-Content-Type-Options = "nosniff"
 Referrer-Policy = "no-referrer"
-Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; object-src 'none'; base-uri 'none'; frame-ancestors 'self' https://app.gohighlevel.com; form-action 'self'"
+Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https:; object-src 'none'; base-uri 'none'; frame-src blob:; frame-ancestors 'self' https://app.gohighlevel.com; form-action 'self'"

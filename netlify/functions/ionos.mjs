@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { stagedAttachments, stagedFiles, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
 import { REQUEST_LIMIT } from '../../server/mail-attachments.mjs';
 import { mailboxPreferences } from '../../server/mail-preferences.mjs';
@@ -114,8 +114,8 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     return reply({ok:true});
    }
    if (action==='signature' && request.method==='POST') {
-    const input=await readInput(request,16000);
-    await preferencesFactory(login.email).saveSignature(input?.signature);
+    const input=await readInput(request,370000);
+    await preferencesFactory(login.email).saveSignature(input?.signature,input?.image);
     return reply({ok:true});
    }
    const mailbox = mailboxFactory(configFor(login));
@@ -124,6 +124,31 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const input = await readInput(request,8192);
     const result = await mailbox.body(input?.id);
     return result ? reply(result) : reply({error:'The message is no longer in this folder. Refresh the mailbox and try again.'},404);
+   }
+   if (action==='attachment' && request.method==='POST') {
+    const input=await readInput(request,8192);
+    const file=await mailbox.attachment(input?.id,input?.part);
+    if (!file) return reply({error:'This attachment is no longer available. Refresh the mailbox.'},404);
+    const ticket=randomUUID();
+    const fileId=randomUUID();
+    const cache=uploadsFactory(login.email);
+    try {
+     const chunks=await cache.saveFile(ticket,fileId,file.content);
+     return reply({ticket,fileId,chunks,name:file.name,type:file.type});
+    } catch(error) {
+     try {await cache.clean(ticket);} catch {}
+     throw error;
+    }
+   }
+   if (action==='attachment-chunk' && request.method==='POST') {
+    const input=await readInput(request,4096);
+    const chunk=await uploadsFactory(login.email).readChunk(input?.ticket,input?.fileId,input?.index);
+    return chunk ? reply({data:chunk.toString('base64')}) : reply({error:'Attachment download expired. Reopen the file.'},404);
+   }
+   if (action==='attachment-release' && request.method==='POST') {
+    const input=await readInput(request,4096);
+    await uploadsFactory(login.email).clean(input?.ticket);
+    return reply({ok:true});
    }
    if (action==='send' && request.method==='POST') {
     const input=await readInput(request,REQUEST_LIMIT);
@@ -144,6 +169,9 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='update' && request.method==='POST') return reply(await mailbox.update(await readInput(request,4096)));
    return reply({error:'Unknown mailbox action.'},404);
   } catch(error) {
+   if (action?.startsWith('attachment')) {
+    return reply({error:error instanceof TypeError?error.message:'Could not load the attachment. Try again.'},error instanceof TypeError?400:502);
+   }
    if (['preferences','draft','signature','upload'].includes(action)) {
     if (error instanceof TypeError) return reply({error:error.message},400);
     return reply({error:action==='upload'?'The file could not upload. Try attaching it again.':'Mailbox drafts or signatures could not sync. Try again.'},502);
