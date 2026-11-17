@@ -31,17 +31,33 @@ export function createHighLevelLogin(env, allowed) {
    if (url.protocol==='https:' && url.origin===value) origins.add(value);
   } catch {}
  }
+ const issues=[];
+ if (!secret) issues.push('GHL_APP_SHARED_SECRET is missing or blank');
+ if (!companyId) issues.push('GHL_COMPANY_ID is missing or blank');
+ if (!locations.size) issues.push('GHL_LOCATION_IDS is missing or blank');
+
  const mailboxes=new Map();
- try {
-  const entries=Object.entries(JSON.parse(env.GHL_IONOS_MAILBOX_PASSWORDS||'{}'));
-  for (const [email,password] of entries) {
-   const address=email.trim().toLowerCase();
-   if (allowed.has(address) && typeof password==='string' && password.length>0 && password.length<=1024) {
-    mailboxes.set(address,password);
+ const raw=env.GHL_IONOS_MAILBOX_PASSWORDS?.trim();
+ if (!raw) issues.push('GHL_IONOS_MAILBOX_PASSWORDS is missing or blank');
+ else {
+  try {
+   const mapping=JSON.parse(raw);
+   if (!mapping || typeof mapping!=='object' || Array.isArray(mapping)) {
+    issues.push('GHL_IONOS_MAILBOX_PASSWORDS must be a JSON object');
+   } else {
+    for (const [email,password] of Object.entries(mapping)) {
+     const address=email.trim().toLowerCase();
+     if (allowed.has(address) && typeof password==='string' && password.trim() && password.length<=1024) {
+      mailboxes.set(address,password);
+     }
+    }
+    if (!mailboxes.size) issues.push('No mailbox in GHL_IONOS_MAILBOX_PASSWORDS has a password and matches IONOS_ALLOWED_MAILBOXES');
    }
+  } catch {
+   issues.push('GHL_IONOS_MAILBOX_PASSWORDS is not valid JSON');
   }
- } catch {}
- if (!secret || !companyId || !locations.size || !mailboxes.size) return null;
+ }
+ if (issues.length) return {login:null,issues};
 
  function getCredentials(identity) {
   if (!identity || typeof identity.email!=='string' || typeof identity.userId!=='string' ||
@@ -50,7 +66,7 @@ export function createHighLevelLogin(env, allowed) {
   const password=mailboxes.get(email);
   return password ? {email,password} : null;
  }
- return {
+ return {issues,login:{
   origins:[...origins],
   verify(payload,origin) {
    if (!origins.has(origin)) return {failure:'ghl_origin'};
@@ -63,5 +79,5 @@ export function createHighLevelLogin(env, allowed) {
    return {identity:{email:credentials.email,userId:context.userId,companyId:context.companyId,activeLocation:context.activeLocation}};
   },
   getCredentials,
- };
+ }};
 }

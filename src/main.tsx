@@ -575,12 +575,16 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown
  {toast&&<div className="toast" role="status"><Check size={17}/>{toast}</div>}
  </div>
 }
-function HostedInbox({ready,highLevelOrigins}:{ready:boolean;highLevelOrigins:string[]}) {
+function HostedInbox({ready,highLevelOrigins,highLevelIssues}:{ready:boolean;highLevelOrigins:string[];highLevelIssues:string[]}) {
  const [token,setToken]=useState('');
  const canAutoSignIn=ready&&window.parent!==window&&highLevelOrigins.length>0;
  const [attempt,setAttempt]=useState(canAutoSignIn?1:0);
  const [checking,setChecking]=useState(canAutoSignIn);
- const [notice,setNotice]=useState('');
+ const [notice,setNotice]=useState(()=>{
+  if (window.parent===window||!ready||highLevelOrigins.length) return '';
+  const detail=highLevelIssues.join('. ');
+  return 'HighLevel auto sign-in is disabled on this deployment.'+(detail?' '+detail+'.':'');
+ });
 
  useEffect(()=>{
   if (!attempt) return;
@@ -607,6 +611,6 @@ const root=createRoot(document.getElementById('root')!);
 if (localToken) root.render(<App liveToken={localToken}/>);
 else if (import.meta.env.PROD && !['127.0.0.1','localhost','[::1]'].includes(location.hostname)) {
  hostedRequest('status').then(status=>{
-  root.render(status.live?<HostedInbox ready={status.ready} highLevelOrigins={status.highLevelOrigins||[]}/>:<App/>);
+  root.render(status.live?<HostedInbox ready={status.ready} highLevelOrigins={status.highLevelOrigins||[]} highLevelIssues={status.highLevelIssues||[]}/>:<App/>);
  }).catch(()=>root.render(<div className="login-page" role="alert">The mailbox service is unavailable. Reload to try again.</div>));
 } else root.render(<App/>);

@@ -290,3 +290,17 @@ test('large staged attachments are reassembled in order and isolated by draft an
  await uploads.clean(id);
  assert.equal(records.size,0);
 });
+
+test('HighLevel status identifies malformed mailbox configuration without returning secret values', async () => {
+ const {createHostedHandler}=await import('../netlify/functions/ionos.mjs');
+ const handler=createHostedHandler({
+  A2Z_MODE:'live',SESSION_SECRET:'a'.repeat(32),IONOS_ALLOWED_MAILBOXES:'first@example.com',
+  GHL_APP_SHARED_SECRET:'fixture secret',GHL_COMPANY_ID:'agency',GHL_LOCATION_IDS:'subaccount',
+  GHL_IONOS_MAILBOX_PASSWORDS:'{"first@example.com":"fixture password",}',
+ });
+ const response=await handler(new Request('https://test.example/.netlify/functions/ionos?action=status'));
+ const status=await response.json();
+ assert.deepEqual(status.highLevelOrigins,[]);
+ assert.deepEqual(status.highLevelIssues,['GHL_IONOS_MAILBOX_PASSWORDS is not valid JSON']);
+ assert.doesNotMatch(JSON.stringify(status),/fixture|first@example/);
+});

@@ -47,7 +47,8 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  const enabled = env.A2Z_MODE==='live';
  const allowed = new Set((env.IONOS_ALLOWED_MAILBOXES||'').split(',').map(value=>value.trim().toLowerCase()).filter(Boolean));
  const ready = enabled && allowed.size>0 && (env.SESSION_SECRET||'').length>=32;
- const highLevel = ready ? createHighLevelLogin(env,allowed) : null;
+ const highLevelSetup = ready ? createHighLevelLogin(env,allowed) : null;
+ const highLevel=highLevelSetup?.login;
  const key = ready ? createHash('sha256').update(env.SESSION_SECRET).digest() : null;
  const configFor = ({email,password}) => ionosConfig({
   A2Z_MODE:'live', A2Z_ENABLE_LIVE:'true', IONOS_EMAIL:email, IONOS_PASSWORD:password,
@@ -56,7 +57,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  return async function handler(request) {
   const url = new URL(request.url);
   const action = url.searchParams.get('action');
-  if (action==='status' && request.method==='GET') return reply({live:enabled,ready,highLevelOrigins:highLevel?.origins||[]});
+  if (action==='status' && request.method==='GET') return reply({live:enabled,ready,highLevelOrigins:highLevel?.origins||[],highLevelIssues:highLevelSetup?.issues||[]});
   if (!ready) return reply({error:'Hosted IONOS is unavailable. Check the deployment settings.'},503);
   const origin = request.headers.get('origin');
   if (origin && origin!==url.origin) return reply({error:'Invalid request origin.'},403);
