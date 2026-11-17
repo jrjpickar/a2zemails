@@ -1,0 +1,137 @@
+/* GHL color mode and dark mode tokens, adapted to the inbox components. */
+:root {
+  color-scheme: dark;
+  --dm-bg: #141210;
+  --dm-surface: #1b1816;
+  --dm-surface-2: #221f1c;
+  --dm-surface-3: #2c2825;
+  --dm-hover: #332e2a;
+  --dm-border: #3a3430;
+  --dm-border-strong: #4a433e;
+  --dm-text: #f2ede8;
+  --dm-text-2: #c2b9b1;
+  --dm-text-3: #9d948c;
+  --dm-accent: #f97316;
+  --dm-accent-strong: #fdba74;
+  --dm-accent-soft: rgba(249,115,22,.16);
+  --gc-canvas: #f7f2ee;
+  --gc-card: #fffaf6;
+  --gc-thread: #740a03;
+  --gc-conv-canvas: #431407;
+  --gc-gold: #f2c14e;
+  --gc-gold-strong: #d99a1e;
+  --theme-radius: 10px;
+  --canvas: var(--dm-bg);
+  --surface: var(--dm-surface);
+  --raised: var(--dm-surface-2);
+  --hover: var(--dm-hover);
+  --selected: #35241b;
+  --line: var(--dm-border);
+  --strong-line: var(--dm-border-strong);
+  --ink: var(--dm-text);
+  --muted: var(--dm-text-2);
+  --dim: var(--dm-text-3);
+  --accent: var(--dm-accent);
+  --accent-text: var(--dm-accent-strong);
+  --accent-fill: var(--dm-accent-soft);
+  --accent-ink: #211207;
+  --sidebar: #191613;
+  --sidebar-hover: #35241b;
+  --sidebar-border: var(--dm-border);
+  --sidebar-text: #f2ede8;
+  --sidebar-muted: #bcb2aa;
+  --sidebar-accent: #fdba74;
+  color: var(--ink);
+  background: var(--canvas);
+}
+
+:root[data-theme="color"] {
+  color-scheme: light;
+  --canvas: var(--gc-canvas);
+  --surface: var(--gc-card);
+  --raised: #fdf3ea;
+  --hover: #fbe9d9;
+  --selected: #fae6d2;
+  --line: #e9d9cc;
+  --strong-line: #d6bdae;
+  --ink: var(--gc-conv-canvas);
+  --muted: #70483a;
+  --dim: #76594f;
+  --accent: var(--gc-gold);
+  --accent-text: #9a3412;
+  --accent-fill: #fed7aa;
+  --accent-ink: #431407;
+  --sidebar: var(--gc-conv-canvas);
+  --sidebar-hover: #63250e;
+  --sidebar-border: #723b26;
+  --sidebar-text: #fff4ea;
+  --sidebar-muted: #e2c2af;
+  --sidebar-accent: var(--gc-gold);
+}
+
+.sidebar { background: var(--sidebar); color: var(--sidebar-muted); }
+.brand strong, .profile b { color: var(--sidebar-text); }
+.brand small, .profile small, .sidebar .nav h2, .profile button { color: var(--sidebar-muted); }
+.nav button:hover, .nav button.active, .env, .profile-avatar { background: var(--sidebar-hover); color: var(--sidebar-text); }
+.nav button.active, .nav button.active svg, .nav button b { color: var(--sidebar-accent); }
+.nav button b { background: var(--sidebar); }
+.profile, .env { border-color: var(--sidebar-border); }
+.env i, .demo-pill i, .unread-dot { background: var(--accent-text); }
+.mark, .compose, .send, .attachment-preview a { background: var(--accent); color: var(--accent-ink); }
+.compose:hover, .send:hover { background: color-mix(in srgb, var(--accent), white 15%); }
+.compose kbd { background: transparent; border-color: currentColor; color: var(--accent-ink); }
+:where(button,input,textarea,select,a):focus-visible { outline-color: var(--accent-text); }
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,a:focus-visible { outline-color: var(--accent-text); }
+.topbar, .reader, .mail-row, .popover, .compose-panel, .attachment-preview, .shortcuts, .signature-settings, .metrics button, .activity, .queue { background: var(--surface); }
+.message-list, .search, .compose-panel header, .attachment-preview header, .shortcuts header, .signature-settings header, .preview-sheet { background: var(--raised); }
+.icon:hover, .star:hover, .popover button:hover, .mail-row:hover, .attachments button:hover, .reply-actions button:hover, .draft-row:hover, .queue-row:hover { background: var(--hover); color: var(--ink); }
+.mail-row.selected { background: var(--selected); border-left-color: var(--accent-text); }
+.search, .demo-pill, select, kbd, .popover, .attachments button, .reply-actions button, .metadata button, .load, .preview-sheet { border-color: var(--line); }
+.search:focus-within, .tabs .on { border-color: var(--accent-text); }
+.eyebrow, .tabs .on, .metrics button>svg:first-child, .preview-sheet svg, .demo-pill, .accent { color: var(--accent-text); }
+.demo-pill, .tabs span { background: var(--accent-fill); }
+.crumb b, .search input, .body, .thread p, .compose-panel input, .reader-empty h2, select { color: var(--ink); }
+.icon, .star, .row-top time, .sender time, .row-content>p, .paper-count, .list-footer, .position, .from, .sender small, .attachments small, .attachments button>svg, .metadata label, .empty, .reader-empty, .sandbox-menu p, .compose-panel label, .signature, .compose-panel footer span, .preview-sheet p, .metrics span, .activity span, .tabs button, .search, .slash { color: var(--muted); }
+select, kbd, .project-tag, .gray, .attachments h3 span, .chips button { background: var(--raised); color: var(--muted); }
+.deadline { background: var(--selected); border-color: var(--strong-line); }
+.deadline-icon, .file-icon { background: var(--accent-fill); color: var(--accent-text); }
+.deadline div>span { color: var(--muted); }
+.toast { border: 1px solid var(--strong-line); background: var(--raised); color: var(--ink); }
+:root:not([data-theme="color"]) .gold { background: #472f1e; color: #ffcd91; }
+:root:not([data-theme="color"]) .purple { background: #382a49; color: #e7cffc; }
+:root:not([data-theme="color"]) .blue { background: #21364b; color: #bfddff; }
+:root:not([data-theme="color"]) .green { background: #273b2c; color: #c5e7c9; }
+:root:not([data-theme="color"]) .rose { background: #482d33; color: #ffd1d7; }
+.theme-toggle { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; padding: 7px 9px; font-size: 11px; font-weight: 650; border: 1px solid var(--line); border-radius: var(--theme-radius); }
+.theme-toggle:hover { background: var(--hover); }
+.signature-settings { width: min(100%, 510px); max-height: 100%; overflow: auto; border: 1px solid var(--line); border-radius: var(--theme-radius); }
+.signature-settings header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; }
+.signature-fields { display: grid; gap: 12px; padding: 16px; }
+.signature-fields p, .queue p { color: var(--muted); font-size: 12px; }
+.signature-fields label { display: grid; gap: 6px; font-size: 12px; }
+.signature-fields textarea { min-height: 70px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--raised); }
+.signature-fields .send { justify-self: end; }
+.compose-panel .signature { display: flex; align-items: start; gap: 8px; }
+.signature div { white-space: pre-wrap; overflow-wrap: anywhere; }
+.queues { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; margin-bottom: 16px; }
+.queue { border: 1px solid var(--line); border-radius: var(--theme-radius); overflow: hidden; }
+.queue header { display: flex; gap: 8px; align-items: center; padding: 14px; }
+.queue header svg { color: var(--accent-text); }
+.queue h2 { font-size: 14px; }
+.queue p { padding: 0 14px 14px; }
+.queue-row { display: grid; gap: 5px; width: 100%; padding: 10px 14px; text-align: left; border-top: 1px solid var(--line); font-size: 12px; overflow-wrap: anywhere; }
+.queue-row small { color: var(--muted); }
+.queue-row time { color: var(--accent-text); font-weight: 650; }
+@media (max-width: 470px) { .theme-toggle span { display: none; } .queues { grid-template-columns: 1fr; } }
+.metadata[hidden] { display: none; }
+.compose-panel .signature label { border: 0; padding: 0; white-space: nowrap; }
+.signature input { accent-color: var(--accent-text); }
+:root .tabs .on { color: var(--accent-text); }
+.login-page { min-height: 100dvh; display: grid; place-items: center; padding: 20px; }
+.login-page input { border: 1px solid var(--line); border-radius: 6px; padding: 10px; color: var(--ink); background: var(--raised); }
+.login-page header span { font-size: 12px; color: var(--muted); }
+.recipient-control { flex: 1; min-width: 0; position: relative; }
+.recipient-control input { width: 100%; }
+.recipient-options { position: absolute; z-index: 2; inset: 100% 0 auto; display: grid; background: var(--surface); border: 1px solid var(--strong-line); border-radius: 8px; box-shadow: 0 8px 22px #0005; max-height: 180px; overflow: auto; }
+.recipient-options [role="option"] { display: grid; gap: 2px; padding: 7px 10px; cursor: pointer; overflow-wrap: anywhere; }
+.recipient-options [aria-selected="true"], .recipient-options [role="option"]:hover { background: var(--hover); color: var(--ink); }
