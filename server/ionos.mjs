@@ -63,6 +63,29 @@ function textParts(node) {
  return [];
 }
 
+const inlineImageTypes = new Set(['image/png','image/jpeg','image/gif','image/webp']);
+const imageBudget = 1024 * 1024;
+
+function relatedImages(node) {
+ if (!node) return [];
+ if (node.type?.startsWith('multipart/')) return (node.childNodes||[]).flatMap(relatedImages);
+ if (!node.part || !node.id || !inlineImageTypes.has(node.type)) return [];
+ return [{...node,cid:node.id.replace(/^<|>$/g,'').toLowerCase()}];
+}
+
+async function readPart(imap,uid,part,limit) {
+ const {content} = await imap.download(uid,part,{uid:true,maxBytes:limit+1});
+ if (!content) return null;
+ const chunks=[];
+ let size=0;
+ for await (const chunk of content) {
+  chunks.push(chunk);
+  size+=chunk.length;
+  if (size>limit) break;
+ }
+ return {raw:Buffer.concat(chunks).subarray(0,limit),truncated:size>limit};
+}
+
 export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, transport=nodemailer.createTransport}={}) {
  const smtp = transport(config.smtp);
  async function saveSent(message) {
@@ -126,7 +149,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
       const references = mimeReferences(parsed,envelope);
       const subject = envelope?.subject || '(No subject)';
       const body = (parsed?.text || '').slice(0,90000);
-      const needsBody = !parsed || (parsed.text?.length || 0)>90000 || (!body && Boolean(parsed.html));
+      const needsBody = !parsed || (parsed.text?.length || 0)>90000 || Boolean(parsed.html) || textParts(item.bodyStructure).some(part=>part.type==='text/html');
       const category = classify(subject,body,from);
       mail.push({
        id, thread:references[0]||headerId||id, name:envelope?.from?.[0]?.name||from||'Unknown sender',
@@ -164,22 +187,44 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
      if (!message) return null;
      if (!message.bodyStructure) throw new Error('IONOS did not return a message structure.');
      const parts = textParts(message.bodyStructure).sort((a,b)=>Number(a.type==='text/html')-Number(b.type==='text/html'));
+     let body='', html='', truncated=false;
+     const images=Object.create(null);
      for (const {part,type} of parts.slice(0,4)) {
-      const {content} = await imap.download(uid,part,{uid:true,maxBytes:detailLimit+1});
-      if (!content) continue;
-      const chunks=[];
-      let size=0;
-      for await (const chunk of content) { chunks.push(chunk); size+=chunk.length; }
-      const raw = Buffer.concat(chunks).subarray(0,detailLimit);
-      let body = raw.toString('utf8');
-      if (type==='text/html') {
-       const mime = 'Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n'+raw.toString('base64');
-       const parsed = await parser(mime,{skipHtmlToText:false,skipImageLinks:true});
-       body = parsed.text||'';
+      if ((type==='text/plain' && body.trim()) || (type==='text/html' && html)) continue;
+      const result=await readPart(imap,uid,part,detailLimit);
+      if (!result) continue;
+      const text=result.raw.toString('utf8');
+      if (type==='text/plain') {
+       body=text;
+       truncated=result.truncated;
+       continue;
       }
-      if (body.trim() || size>detailLimit) return {body,truncated:size>detailLimit};
+      if (!body.trim()) {
+       const mime = 'Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n'+result.raw.toString('base64');
+       const parsed = await parser(mime,{skipHtmlToText:false,skipImageLinks:true});
+       body=parsed.text||'';
+       truncated=result.truncated;
+      }
+      if (!result.truncated && text.trim()) html=text;
      }
-     return {body:'',truncated:false};
+     if (html) {
+      const requested = new Set([...html.matchAll(/\bcid:([^"'<>\s]+)/gi)].map(match=>{
+       try {return decodeURIComponent(match[1]).toLowerCase();} catch {return match[1].toLowerCase();}
+      }));
+      let remaining=imageBudget;
+      const candidates=relatedImages(message.bodyStructure).filter(image=>requested.has(image.cid)).slice(0,12);
+      for (const image of candidates) {
+       if (remaining<=0) break;
+       if (image.size>remaining*1.5) continue;
+       try {
+        const result=await readPart(imap,uid,image.part,remaining);
+        if (!result || result.truncated || !result.raw.length) continue;
+        images[image.cid]='data:'+image.type+';base64,'+result.raw.toString('base64');
+        remaining-=result.raw.length;
+       } catch { /* A missing inline image should not hide the message. */ }
+      }
+     }
+     return {body,truncated,...(html?{html,images}:{})};
     } finally {lock.release();}
    } finally {imap.close();}
   },

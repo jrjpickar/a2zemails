@@ -37,7 +37,7 @@ const server = createServer(async(req,res)=>{
  res.setHeader('Cache-Control','no-store');
  res.setHeader('X-Content-Type-Options','nosniff');
  res.setHeader('Referrer-Policy','no-referrer');
- res.setHeader('Content-Security-Policy',"default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+ res.setHeader('Content-Security-Policy',"default-src 'self'; img-src 'self' data: https:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
  if (req.headers.host!==host || (req.headers.origin && req.headers.origin!==origin)) {
   return json(res,403,{error:'The IONOS server is available on this computer only.'});
  }

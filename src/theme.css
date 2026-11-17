@@ -142,3 +142,61 @@ select, kbd, .project-tag, .gray, .attachments h3 span, .chips button { backgrou
 .mail-quote { margin: 0; padding: 4px 0 4px 14px; border-left: 2px solid var(--strong-line); }
 .mail-quote-toggle > summary { width: fit-content; cursor: pointer; font-size: 12px; font-weight: 650; color: var(--muted); }
 .mail-quote-toggle[open] > summary { margin-bottom: 8px; }
+.rich-mail > button { margin-bottom: 10px; cursor: pointer; }
+
+.mobile-dock { display: none; }
+@media (max-width:760px) {
+ .app { height:100dvh; }
+ .topbar { min-height:56px; height:auto; padding-top:env(safe-area-inset-top); }
+ .topbar .icon, .topbar button, .reader-tools .icon { min-height:44px; }
+ .topbar button { padding-inline:8px; }
+ .topbar .theme-toggle span, .search kbd, .reader-tools .position { display:none; }
+ .search { min-height:42px; min-width:0; }
+ .search input, .login-page input, .compose-panel input:not([type=checkbox]), .compose-panel select,
+ .compose-panel textarea, .signature-fields textarea { font-size:16px; }
+ .reader-tools { gap:2px; padding-inline:6px; }
+ .reader-tools .icon { width:42px; }
+ .reader-scroll, .rows, .dashboard { overscroll-behavior-y:contain; }
+ .reader-content { padding:16px; }
+ .reader-content .body { font-size:15px; line-height:1.55; }
+ .desktop-replies { display:none; }
+ .mobile-dock {
+  display:flex; flex-shrink:0; align-items:stretch; gap:4px; padding:4px 8px max(5px,env(safe-area-inset-bottom));
+  background:var(--surface); border-top:1px solid var(--line);
+ }
+ .mobile-dock button {
+  min-height:46px; flex:1; border-radius:8px; display:flex; align-items:center;
+  justify-content:center; gap:5px; font-size:12px; font-weight:650; color:var(--muted);
+ }
+ .mobile-mailbar button { flex-direction:column; font-size:11px; gap:3px; }
+ .mobile-dock button[aria-current=page] { background:var(--raised); color:var(--accent-text); }
+ .mobile-dock .mobile-compose { background:var(--accent); color:var(--accent-ink); }
+ .mail-row .row-side { padding-top:8px; }
+ .row-side .star { width:30px; height:30px; }
+ .row-content { padding:12px 10px; }
+ .row-content>strong, .row-top b { font-size:14px; }
+ .row-content>p { font-size:12px; }
+ .list-head { padding:14px 16px 12px; }
+ .sidebar { padding-bottom:max(14px,env(safe-area-inset-bottom)); }
+ .nav button { min-height:44px; }
+ .login-page { padding:16px; padding-bottom:max(16px,env(safe-area-inset-bottom)); }
+ .login-page .send, .login-page .project-tag { min-height:44px; }
+ .login-page .send { width:100%; justify-content:center; }
+ .compose-overlay { inset:var(--compose-top,0px) 0 auto; height:var(--compose-height,100dvh); padding:0; }
+ .compose-overlay .compose-panel {
+  width:100%; height:100%; display:flex; flex-direction:column; border-radius:0;
+ }
+ .compose-panel header { flex-shrink:0; position:sticky; top:0; z-index:4; padding-top:max(8px,env(safe-area-inset-top)); }
+ .compose-panel label { min-height:42px; }
+ .compose-panel textarea { flex:1 0 110px; resize:none; }
+ .compose-panel footer { position:sticky; bottom:0; background:var(--surface); padding-bottom:max(10px,env(safe-area-inset-bottom)); }
+ .compose-panel .send, .compose-panel header .icon, .compose-panel footer .icon { min-height:44px; }
+ .compose-panel .draft-status { font-size:10px; }
+ .recipient-options [role=option] { min-height:44px; }
+ .toast { bottom:calc(64px + env(safe-area-inset-bottom)); }
+}
+@media (max-width:370px) {
+ .reader-tools .icon { width:35px; }
+ .topbar button { padding-inline:5px; }
+ .topbar .demo-pill svg { display:none; }
+}

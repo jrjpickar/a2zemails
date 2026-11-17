@@ -3,9 +3,10 @@ import React,{useEffect,useMemo,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {LayoutDashboard,ClipboardList,FolderKanban,Calculator,FileQuestion,HardHat,Receipt,Inbox,Send,FileText,Archive,Trash2,ShieldAlert,Plus,Search,SlidersHorizontal,PanelLeft,ChevronDown,ChevronLeft,Star,Paperclip,Reply,ReplyAll,Forward,MoreHorizontal,ArrowUpRight,Mail,Clock3,X,Check,Download,RotateCcw,MailOpen,Menu,ArrowRight,Moon,Palette,Settings2} from 'lucide-react';
 import {categories,projects,seed,classify,matchProject,searchMail,initialState,threadFor,rowActions,appendSignature,dashboardQueues} from './model.mjs';
+import {RichMail,type MailBody} from './rich-mail';
 import {MessageText} from './message-text';
 import {RecipientInput,type Contact} from './recipient-input';
-import {hostedRequest,MailboxLogin} from './hosted';
+import {hostedRequest,MailboxLogin,requestHighLevelContext} from './hosted';
 import './style.css';
 import './theme.css';
 type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;needsBody?:boolean;files:string[];due?:string;from:string;to:string;cc:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
@@ -130,8 +131,8 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
  const currentRow=row&&list.some(m=>m.id===row.id)?row:undefined;
  const related=currentRow?threadFor(mail,currentRow) as Message[]:[];
  const newest=related.filter(m=>m.id!==currentRow?.id);
- const [bodies,setBodies]=useState<Record<string,{body:string;truncated:boolean}|{error:string}>>({});
- const bodyRequests=React.useRef(new Map<string,Promise<{body:string;truncated:boolean}>>());
+ const [bodies,setBodies]=useState<Record<string,MailBody|{error:string}>>({});
+ const bodyRequests=React.useRef(new Map<string,Promise<MailBody>>());
 
  function loadBody(message:Message) {
   const cached=bodies[message.id];
@@ -143,7 +144,7 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
    delete next[message.id];
    return next;
   });
-  const pending=liveRequest('body',{id:message.id}).then((result:{body:string;truncated:boolean})=>{
+  const pending=liveRequest('body',{id:message.id}).then((result:MailBody)=>{
    setBodies(previous=>({...previous,[message.id]:result}));
    return result;
   }).catch(error=>{
@@ -162,7 +163,7 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
   if (!message.needsBody) return <div className="body"><MessageText body={message.body}/></div>;
   if (result && 'error' in result) return <div className="body" role="status">{result.error} <button className="project-tag" onClick={()=>void loadBody(message).catch(()=>{})}>Retry</button></div>;
   if (!result) return <div className="body" role="status">Loading message from IONOS…</div>;
-  return <div className="body"><MessageText body={result.body}/>{result.truncated&&<p className="message-note">The text body is too long to display in full. Open this message in IONOS Webmail to read the rest.</p>}</div>;
+  return <div className="body">{result.html?<RichMail key={message.id} html={result.html} images={result.images} dark={theme==='dark'}/>:<MessageText body={result.body}/>}{result.truncated&&<p className="message-note">The text body is too long to display in full. Open this message in IONOS Webmail to read the rest.</p>}</div>;
  }
 
  function go(next:string){setNav(next);setQuery('');setFilter('All mail');setProjectFilter('');setMarked([]);setMenu('');setMobileRead(false);setSide(false);setLimit(60)}
@@ -236,14 +237,17 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
   setState(s=>({...s,mail:[m,...s.mail],drafts:s.drafts.filter(d=>d.id!==draft.id)}));setCompose(null);setToast(rejected.length?'IONOS rejected: '+rejected.join(', '):liveToken?(sentSaved?'Message accepted by IONOS':'Message sent. IONOS could not save a copy to Sent.'):'Message sent in sandbox');
   if(!draft.thread){go('Sent');setSelected(id);setMobileRead(true)}
  }
+ function refreshCurrentView() {
+  if (liveToken) void refreshMailbox();
+  else {setState(getState());setToast('Sandbox inbox refreshed');}
+ }
  function receive(){const id=crypto.randomUUID(),s=samples[2];const subject='NTP — Riverside Warehouse field mobilization';const m:Message={...s,id,thread:id,subject,date:new Date().toISOString(),body:'Notice to proceed is approved. Please confirm the mobilization window with field operations.',category:classify(subject,'',s.from,state.rules),project:matchProject(subject),unread:true,star:false,files:[],headers:{messageId:'<'+id+'@a2z.example>',references:[]}};setState(s=>({...s,mail:[m,...s.mail]}));go('Inbox');setToast('Sample email received')}
  useEffect(()=>{function key(e:KeyboardEvent){if(e.key==='Escape'){if(preview)setPreview(null);else if(signatureForm)setSignatureForm(null);else if(compose&&!sending)setCompose(null);else if(help)setHelp(false);else {setMenu('');setMobileRead(false)}return}const editable=(e.target instanceof HTMLElement ? e.target : document.body).closest('input,textarea,select,[contenteditable="true"]');
   if(e.metaKey&&!e.ctrlKey&&!e.altKey){
    const letter=e.key.toLowerCase();
    if(letter==='r'&&e.shiftKey){
     e.preventDefault();
-    if(liveToken)void refreshMailbox();
-    else {setState(getState());setToast('Sandbox inbox refreshed');}
+    refreshCurrentView();
     return;
    }
    if(!e.shiftKey&&!editable&&!compose&&!preview&&!help&&!signatureForm&&currentRow&&['r','f'].includes(letter)){
@@ -257,6 +261,27 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
  }document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key)});
  const tag=(m:Message)=><span className={'tag '+tones[m.category]}>{tags[m.category]}</span>;
  const project=projects.find(p=>p.id===currentRow?.project);
+ function replyButtons(message:Message) {
+  return ([[Reply,'Reply'],[ReplyAll,'Reply all'],[Forward,'Forward']] as const).map(([Icon,label])=>
+   <button key={label} onClick={()=>start(label,message)}><Icon size={18}/>{label}</button>);
+ }
+ useEffect(()=>{
+  const viewport=window.visualViewport;
+  if (!draft || !viewport) return;
+  const update=()=>{
+   document.documentElement.style.setProperty('--compose-height',viewport.height+'px');
+   document.documentElement.style.setProperty('--compose-top',viewport.offsetTop+'px');
+  };
+  update();
+  viewport.addEventListener('resize',update);
+  viewport.addEventListener('scroll',update);
+  return ()=>{
+   viewport.removeEventListener('resize',update);
+   viewport.removeEventListener('scroll',update);
+   document.documentElement.style.removeProperty('--compose-height');
+   document.documentElement.style.removeProperty('--compose-top');
+  };
+ },[Boolean(draft)]);
  return <div className={'app '+(mobileRead?'reading ':'')+(side?'sidebar-open':'')}>
  {side&&<button className="scrim" aria-label="Close navigation" onClick={()=>setSide(false)}/>}
  <aside className="sidebar">
@@ -307,13 +332,19 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
  {currentRow.due&&<div className="deadline"><div className="deadline-icon"><Clock3 size={19}/></div><div><b>Bid submission deadline</b><span>{day(currentRow.due+'T12:00:00')}</span></div><span className="tag gold">Open bid</span></div>}
  {renderBody(currentRow)}
  {!liveToken&&currentRow.files.length>0&&<div className="attachments"><h3><Paperclip size={15}/> Attachments <span>{currentRow.files.length}</span></h3><div>{currentRow.files.map((f,i)=><button key={i} onClick={()=>setPreview(f)}><span className="file-icon"><FileText size={19}/></span><span><b>{f}</b><small>Sandbox attachment</small></span><Download size={16}/></button>)}</div></div>}
- <div className="reply-actions">{([[Reply,'Reply'],[ReplyAll,'Reply all'],[Forward,'Forward']] as const).map(([Icon,label])=><button key={label} onClick={()=>start(label,currentRow)}><Icon size={16}/>{label}</button>)}</div>
+ <div className="reply-actions desktop-replies">{replyButtons(currentRow)}</div>
  {newest.length>0&&<section className="thread"><h3>Conversation · {related.length} messages</h3>{newest.map(m=><details key={m.id} onToggle={e=>{if(e.currentTarget.open&&m.needsBody&&!bodies[m.id])void loadBody(m).catch(()=>{})}}><summary>{m.name} · {time(m.date)}</summary>{renderBody(m)}{!liveToken&&m.files.map(f=><button key={f} onClick={()=>setPreview(f)}>{f}</button>)}</details>)}</section>}
  <div className="metadata" hidden={!!liveToken}><label>Project<select value={currentRow.project} onChange={e=>{change([currentRow.id],{project:e.target.value});setToast('Project assignment saved')}}><option value="">Unassigned</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><label>Category<select value={currentRow.category} onChange={e=>{change([currentRow.id],{category:e.target.value});setToast('Category corrected')}}>{categories.map(c=><option key={c}>{c}</option>)}</select></label><button onClick={()=>{const domain=currentRow.from.split('@')[1];setState(s=>({...s,rules:{...s.rules,[domain]:currentRow.category}}));setToast('Rule saved for future messages from '+domain)}}>Remember sender domain rule</button></div>
- </div></div></>:<div className="reader-empty"><Inbox size={29}/><h2>Select a message</h2><p>Open a conversation to read it here.</p></div>}</section>
+ </div></div><nav className="mobile-dock mobile-replies" aria-label="Message actions">{replyButtons(currentRow)}</nav></>:<div className="reader-empty"><Inbox size={29}/><h2>Select a message</h2><p>Open a conversation to read it here.</p></div>}</section>
  </div>}
+ {(!mobileRead||!currentRow)&&<nav className="mobile-dock mobile-mailbar" aria-label="Mailbox actions">
+  <button aria-current={nav==='Inbox'&&!query?'page':undefined} onClick={()=>go('Inbox')}><Inbox size={19}/>Inbox</button>
+  <button aria-current={nav==='Drafts'&&!query?'page':undefined} onClick={()=>go('Drafts')}><FileText size={19}/>Drafts</button>
+  <button onClick={refreshCurrentView}><RotateCcw size={19}/>Refresh</button>
+  <button className="mobile-compose" disabled={!!liveToken&&!account} onClick={()=>start()}><Plus size={19}/>Compose</button>
+ </nav>}
  </main>
- {draft&&<div className="modal-back" onClick={()=>{if(!sending)setCompose(null)}}><form className="compose-panel" onClick={e=>e.stopPropagation()} onSubmit={sendDraft}><header><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending} onClick={()=>setCompose(null)}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label><textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}</div></div>{draft.files.length>0&&<div className="chips">{draft.files.map((f,i)=><button type="button" key={i} onClick={()=>edit({files:draft.files.filter((_,j)=>j!==i)})}>{f} ×</button>)}</div>}<footer><button className="send" type="submit" disabled={sending}><Send size={16}/> {sending?'Sending…':liveToken?'Send email':'Send test email'}</button>{!liveToken&&<button type="button" className="icon" title="Attach sample plan set" onClick={()=>{if(!draft.files.includes('Demo Plan Set.pdf'))edit({files:[...draft.files,'Demo Plan Set.pdf']})}}><Paperclip size={18}/></button>}<span>{liveToken?'Draft kept for this session':'Draft saved locally'}</span><button type="button" className="icon" title="Discard draft" disabled={sending} onClick={()=>discard(draft.id)}><Trash2 size={18}/></button></footer></form></div>}
+ {draft&&<div className="modal-back compose-overlay" onClick={()=>{if(!sending)setCompose(null)}}><form className="compose-panel" role="dialog" aria-label="Compose message" aria-modal="true" onClick={e=>e.stopPropagation()} onSubmit={sendDraft}><header><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending} onClick={()=>setCompose(null)}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label><textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}</div></div>{draft.files.length>0&&<div className="chips">{draft.files.map((f,i)=><button type="button" key={i} onClick={()=>edit({files:draft.files.filter((_,j)=>j!==i)})}>{f} ×</button>)}</div>}<footer><button className="send" type="submit" disabled={sending}><Send size={16}/> {sending?'Sending…':liveToken?'Send email':'Send test email'}</button>{!liveToken&&<button type="button" className="icon" title="Attach sample plan set" onClick={()=>{if(!draft.files.includes('Demo Plan Set.pdf'))edit({files:[...draft.files,'Demo Plan Set.pdf']})}}><Paperclip size={18}/></button>}<span className="draft-status">{liveToken?'Draft kept for this session':'Draft saved locally'}</span><button type="button" className="icon" title="Discard draft" disabled={sending} onClick={()=>discard(draft.id)}><Trash2 size={18}/></button></footer></form></div>}
  {signatureForm&&<div className="modal-back centered" onClick={()=>setSignatureForm(null)}>
  <form className="signature-settings" role="dialog" aria-label="Email signatures" onClick={e=>e.stopPropagation()} onSubmit={e=>{
   e.preventDefault();
@@ -334,15 +365,38 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
  {toast&&<div className="toast" role="status"><Check size={17}/>{toast}</div>}
  </div>
 }
-function HostedInbox({ready}:{ready:boolean}) {
+function HostedInbox({ready,highLevelOrigins}:{ready:boolean;highLevelOrigins:string[]}) {
  const [token,setToken]=useState('');
- return token ? <App liveToken={token} onSignOut={()=>setToken('')}/> : <MailboxLogin ready={ready} onLogin={setToken}/>;
+ const canAutoSignIn=ready&&window.parent!==window&&highLevelOrigins.length>0;
+ const [attempt,setAttempt]=useState(canAutoSignIn?1:0);
+ const [checking,setChecking]=useState(canAutoSignIn);
+ const [notice,setNotice]=useState('');
+
+ useEffect(()=>{
+  if (!attempt) return;
+  const controller=new AbortController();
+  requestHighLevelContext(highLevelOrigins,controller.signal)
+   .then(context=>hostedRequest('ghl-login',context))
+   .then(result=>{if(!controller.signal.aborted)setToken(result.token)})
+   .catch(()=>{if(!controller.signal.aborted)setNotice('HighLevel automatic sign-in is unavailable. You can sign in with your IONOS mailbox.')})
+   .finally(()=>{if(!controller.signal.aborted)setChecking(false)});
+  return ()=>controller.abort();
+ },[attempt,highLevelOrigins]);
+
+ if (token) return <App liveToken={token} onSignOut={()=>{setToken('');setAttempt(0)}}/>;
+ if (checking) return <div className="login-page" role="status">
+  <div className="signature-settings signature-fields"><h1>Signing in through HighLevel…</h1>
+  <button className="project-tag" onClick={()=>{setAttempt(0);setChecking(false)}}>Use mailbox password instead</button></div>
+ </div>;
+ return <MailboxLogin ready={ready} onLogin={setToken} notice={notice} retry={canAutoSignIn?()=>{
+  setChecking(true);setNotice('');setAttempt(n=>n+1);
+ }:undefined}/>;
 }
 
 const root=createRoot(document.getElementById('root')!);
 if (localToken) root.render(<App liveToken={localToken}/>);
 else if (import.meta.env.PROD && !['127.0.0.1','localhost','[::1]'].includes(location.hostname)) {
  hostedRequest('status').then(status=>{
-  root.render(status.live?<HostedInbox ready={status.ready}/>:<App/>);
+  root.render(status.live?<HostedInbox ready={status.ready} highLevelOrigins={status.highLevelOrigins||[]}/>:<App/>);
  }).catch(()=>root.render(<div className="login-page" role="alert">The mailbox service is unavailable. Reload to try again.</div>));
 } else root.render(<App/>);

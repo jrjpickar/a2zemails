@@ -21,7 +21,7 @@ export function RecipientInput({label,value,onChange,contacts,autoFocus}:{
  }
  return <label className="recipient-label">{label}
   <span className="recipient-control">
-   <input autoFocus={autoFocus} role="combobox" aria-label={label} aria-autocomplete="list" aria-expanded={matches.length>0}
+   <input autoFocus={autoFocus} role="combobox" aria-label={label} inputMode="email" autoCapitalize="none" autoCorrect="off" spellCheck={false} aria-autocomplete="list" aria-expanded={matches.length>0}
     aria-controls={matches.length?id:undefined} aria-activedescendant={selected>=0?id+'-'+selected:undefined}
     value={value} onChange={event=>{onChange(event.target.value);setActive(0);setFocused(true)}}
     onFocus={()=>setFocused(true)} onBlur={()=>setFocused(false)}

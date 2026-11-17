@@ -130,6 +130,8 @@ test('opening a large IONOS email fetches only its readable MIME body', async ()
   ]},
   {type:'application/pdf',part:'2',disposition:'attachment'},
   {type:'text/plain',part:'3',disposition:'attachment'},
+  {type:'image/png',part:'4',id:'<logo@sample>',disposition:'inline'},
+  {type:'image/png',part:'5',id:'<unused@sample>',disposition:'inline'},
  ]};
  class FakeImap {
   async connect() {}
@@ -154,7 +156,8 @@ test('opening a large IONOS email fetches only its readable MIME body', async ()
    calls.push(part);
    assert.equal(options.uid,true);
    assert.equal(options.maxBytes,1024*1024+1);
-   const body=part==='1.1'?'  ':'<p>Use the <strong>revised plans</strong>.</p><img src="https://example.com/pixel">';
+   if (part==='4') return {content:Readable.from([Buffer.from('iVBORw0KGgo=','base64')])};
+   const body=part==='1.1'?'  ':'<p>Use the <strong>revised plans</strong>.</p><img src="https://example.com/pixel"><img src="cid:logo@sample">';
    return {content:Readable.from([Buffer.from(body)])};
   }
   close() {}
@@ -167,6 +170,56 @@ test('opening a large IONOS email fetches only its readable MIME body', async ()
  assert.match(detail.body,/Use the revised plans\./);
  assert.doesNotMatch(detail.body,/<img|<strong>/);
  assert.equal(detail.truncated,false);
- assert.deepEqual(calls,['1.1','1.2']);
+ assert.match(detail.html,/<strong>revised plans<\/strong>/);
+ assert.equal(detail.images['logo@sample'],'data:image/png;base64,iVBORw0KGgo=');
+ assert.deepEqual(calls,['1.1','1.2','4']);
  assert.equal(await mailbox.body('INBOX:21:4'),null);
+});
+
+test('HighLevel auto sign-in uses only a matching allowed mailbox in the approved agency and location', async () => {
+ const {createCipheriv,createHash}=await import('node:crypto');
+ const {createHostedHandler}=await import('../netlify/functions/ionos.mjs');
+ const secret='example HighLevel shared secret';
+ const identity={email:env.IONOS_EMAIL.toUpperCase(),userId:'user-1',companyId:'company-1',activeLocation:'location-1'};
+ function payload(context,key=secret) {
+  const salt=Buffer.from('01234567');
+  let digest=Buffer.alloc(0);
+  let material=Buffer.alloc(0);
+  while(material.length<48) {
+   digest=createHash('md5').update(digest).update(key).update(salt).digest();
+   material=Buffer.concat([material,digest]);
+  }
+  const cipher=createCipheriv('aes-256-cbc',material.subarray(0,32),material.subarray(32,48));
+  return Buffer.concat([Buffer.from('Salted__'),salt,cipher.update(JSON.stringify(context)),cipher.final()]).toString('base64');
+ }
+ const config={
+  ...env,
+  SESSION_SECRET:'fixture-session-key-only-000000000000000000000000000000',
+  IONOS_ALLOWED_MAILBOXES:env.IONOS_EMAIL,
+  GHL_APP_SHARED_SECRET:secret,GHL_COMPANY_ID:'company-1',GHL_LOCATION_IDS:'location-1',
+  GHL_IONOS_MAILBOX_PASSWORDS:JSON.stringify({[env.IONOS_EMAIL]:env.IONOS_PASSWORD}),
+ };
+ const deps={mailboxFactory:mailConfig=>({mail:async()=>{
+  assert.equal(mailConfig.imap.auth.pass,env.IONOS_PASSWORD);
+  return {email:mailConfig.email,mail:[]};
+ }})};
+ const handler=createHostedHandler(config,deps);
+ const call=(action,{body,token}={},handle=handler)=>handle(new Request('https://inbox.example/.netlify/functions/ionos?action='+action,{
+  method:body?'POST':'GET',
+  headers:{...(body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{})},
+  body:body?JSON.stringify(body):undefined,
+ }));
+ const exchange=(encryptedData,parentOrigin='https://app.gohighlevel.com')=>call('ghl-login',{body:{encryptedData,parentOrigin}});
+ assert.equal((await exchange(payload({...identity,activeLocation:'wrong-location'}))).status,401);
+ assert.equal((await exchange(payload({...identity,companyId:'wrong-company'}))).status,401);
+ assert.equal((await exchange(payload({...identity,email:'other@example.com'}))).status,401);
+ assert.equal((await exchange(payload(identity,'wrong-secret'))).status,401);
+ assert.equal((await exchange(payload(identity),'https://example.com')).status,401);
+ const result=await exchange(payload(identity));
+ assert.equal(result.status,200);
+ const {token,email}=await result.json();
+ assert.equal(email,env.IONOS_EMAIL);
+ assert.equal((await call('mail',{token})).status,200);
+ const revoked=createHostedHandler({...config,GHL_IONOS_MAILBOX_PASSWORDS:'{}'},deps);
+ assert.equal((await call('mail',{token},revoked)).status,401);
 });

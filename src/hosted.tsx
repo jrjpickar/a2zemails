@@ -17,7 +17,7 @@ export async function hostedRequest(action:string, body?:object, token?:string) 
  return data;
 }
 
-export function MailboxLogin({ready,onLogin}:{ready:boolean;onLogin:(token:string)=>void}) {
+export function MailboxLogin({ready,onLogin,notice,retry}:{ready:boolean;onLogin:(token:string)=>void;notice?:string;retry?:()=>void}) {
  const [busy,setBusy]=useState(false);
  const [error,setError]=useState('');
  async function signIn(event:FormEvent<HTMLFormElement>) {
@@ -42,10 +42,34 @@ export function MailboxLogin({ready,onLogin}:{ready:boolean;onLogin:(token:strin
   <header><b>A2Z Construction</b><span>IONOS Mail</span></header>
   <div className="signature-fields">
    <h1>Sign in to your mailbox</h1>
-   <label>IONOS email address<input name="email" type="email" autoComplete="username" required disabled={!ready||busy}/></label>
+   {notice&&<p role="status">{notice}</p>}
+   {retry&&<button type="button" className="project-tag" onClick={retry}>Try HighLevel sign-in again</button>}
+   <label>IONOS email address<input name="email" type="email" autoComplete="username" inputMode="email" autoCapitalize="none" autoCorrect="off" spellCheck={false} required disabled={!ready||busy}/></label>
    <label>Mailbox password<input name="password" type="password" autoComplete="current-password" required disabled={!ready||busy}/></label>
    {(!ready||error)&&<p role="alert">{error||'This deployment needs a session secret and allowed mailbox addresses.'}</p>}
    <button className="send" disabled={!ready||busy}>{busy?'Signing in…':'Sign in'}</button>
   </div>
  </form></div>;
+}
+
+export function requestHighLevelContext(origins:string[],signal:AbortSignal) {
+ return new Promise<{encryptedData:string;parentOrigin:string}>((resolve,reject)=>{
+  function cleanup() {
+   window.clearTimeout(timer);
+   window.removeEventListener('message',receive);
+   signal.removeEventListener('abort',abort);
+  }
+  function abort() {cleanup();reject(new Error('HighLevel sign-in was interrupted.'));}
+  function receive(event:MessageEvent) {
+   if (event.source!==window.parent || !origins.includes(event.origin) ||
+       event.data?.message!=='REQUEST_USER_DATA_RESPONSE' || typeof event.data.payload!=='string') return;
+   cleanup();
+   resolve({encryptedData:event.data.payload,parentOrigin:event.origin});
+  }
+  const timer=window.setTimeout(()=>{cleanup();reject(new Error('HighLevel did not provide a sign-in session.'));},4000);
+  if (signal.aborted) {abort();return;}
+  window.addEventListener('message',receive);
+  signal.addEventListener('abort',abort,{once:true});
+  for (const origin of origins) window.parent.postMessage({message:'REQUEST_USER_DATA'},origin);
+ });
 }

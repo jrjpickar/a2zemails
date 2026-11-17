@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:crypto';
+import { createHighLevelLogin } from '../../server/ghl-sso.mjs';
 import { ImapFlow } from 'imapflow';
 import { createIonosMailbox, ionosConfig } from '../../server/ionos.mjs';
 
@@ -42,6 +43,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  const enabled = env.A2Z_MODE==='live';
  const allowed = new Set((env.IONOS_ALLOWED_MAILBOXES||'').split(',').map(value=>value.trim().toLowerCase()).filter(Boolean));
  const ready = enabled && allowed.size>0 && (env.SESSION_SECRET||'').length>=32;
+ const highLevel = ready ? createHighLevelLogin(env,allowed) : null;
  const key = ready ? createHash('sha256').update(env.SESSION_SECRET).digest() : null;
  const configFor = ({email,password}) => ionosConfig({
   A2Z_MODE:'live', A2Z_ENABLE_LIVE:'true', IONOS_EMAIL:email, IONOS_PASSWORD:password,
@@ -50,7 +52,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  return async function handler(request) {
   const url = new URL(request.url);
   const action = url.searchParams.get('action');
-  if (action==='status' && request.method==='GET') return reply({live:enabled,ready});
+  if (action==='status' && request.method==='GET') return reply({live:enabled,ready,highLevelOrigins:highLevel?.origins||[]});
   if (!ready) return reply({error:'Hosted IONOS is unavailable. Check the deployment settings.'},503);
   const origin = request.headers.get('origin');
   if (origin && origin!==url.origin) return reply({error:'Invalid request origin.'},403);
@@ -71,7 +73,14 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     finally { client.close(); }
     return reply({token:encrypt(key,{email,password}),email});
    }
-   const login = decrypt(key,request.headers.get('authorization'));
+   if (action==='ghl-login' && request.method==='POST') {
+    const input=await readInput(request,26000);
+    const identity=highLevel?.verify(input?.encryptedData,input?.parentOrigin);
+    if (!identity) return reply({error:'Automatic sign-in is unavailable for this HighLevel account.'},401);
+    return reply({token:encrypt(key,{highLevel:identity}),email:identity.email});
+   }
+   const session = decrypt(key,request.headers.get('authorization'));
+   const login = session?.highLevel ? highLevel?.getCredentials(session.highLevel) : session;
    if (!login || !allowed.has(login.email)) return reply({error:'Sign in to your IONOS mailbox again.'},401);
    const mailbox = mailboxFactory(configFor(login));
    if (action==='mail' && request.method==='GET') return reply(await mailbox.mail());

@@ -11,6 +11,7 @@
     "ionos": "node --env-file=.env server/local.mjs"
   },
   "dependencies": {
+    "dompurify": "^3.4.18",
     "imapflow": "^1.0.0",
     "lucide-react": "0.468.0",
     "mailparser": "^3.14.5",
