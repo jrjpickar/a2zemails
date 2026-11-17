@@ -60,6 +60,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
   if (request.method==='POST' && request.headers.get('content-type')!=='application/json') {
    return reply({error:'Expected a JSON request.'},415);
   }
+  let session;
   try {
    if (action==='login' && request.method==='POST') {
     const input = await readInput(request,4096);
@@ -84,9 +85,12 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     },401);
     return reply({token:encrypt(key,{highLevel:result.identity}),email:result.identity.email});
    }
-   const session = decrypt(key,request.headers.get('authorization'));
+   session = decrypt(key,request.headers.get('authorization'));
    const login = session?.highLevel ? highLevel?.getCredentials(session.highLevel) : session;
-   if (!login || !allowed.has(login.email)) return reply({error:'Sign in to your IONOS mailbox again.'},401);
+   if (!login || !allowed.has(login.email)) return reply({
+    error:'Sign in to your IONOS mailbox again.',
+    reason:session?.highLevel?'ghl_mailbox':'session_expired',
+   },401);
    const mailbox = mailboxFactory(configFor(login));
    if (action==='mail' && request.method==='GET') return reply(await mailbox.mail());
    if (action==='body' && request.method==='POST') {
@@ -100,8 +104,16 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
   } catch(error) {
    if (error instanceof TypeError) return reply({error:'Check your mailbox settings or message fields.'},400);
    if (error.authenticationFailed || error.code==='EAUTH' || error.serverResponseCode==='AUTHENTICATIONFAILED') {
+    if (session?.highLevel) {
+     console.warn('[IONOS] HighLevel session accepted; IMAP rejected the configured mailbox credential.');
+     return reply({error:'HighLevel signed you in, but IONOS rejected the saved mailbox credential.',reason:'ghl_ionos_auth'},401);
+    }
     if (action==='login') console.warn('[IONOS] Direct sign-in credentials rejected by the mail server.');
     return reply({error:mailboxSignInError},401);
+   }
+   if (session?.highLevel && action==='mail') {
+    console.warn('[IONOS] HighLevel session accepted; mailbox connection failed.');
+    return reply({error:'HighLevel signed you in, but Inbox could not open the IONOS mailbox.',reason:'ghl_ionos_unavailable'},502);
    }
    return reply({error:action==='send'
     ? 'IONOS did not confirm delivery. Check Sent before retrying.'

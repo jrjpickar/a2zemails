@@ -59,13 +59,14 @@ const day=(v:string)=>new Date(v).toLocaleDateString('en-US',{month:'short',day:
 const time=(v:string)=>v.slice(0,10)==='2026-11-17'?new Date(v).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}):new Date(v).toLocaleDateString('en-US',{month:'short',day:'numeric'});
 const initials=(name:string)=>name.split(' ').slice(0,2).map(s=>s[0]).join('');
 const avatarColors=['sand','lavender','sage','peach','sky'];
-function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
+function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:(error?:unknown)=>void}){
  const [knownContacts,setKnownContacts]=useState<Contact[]>([]);
  async function liveRequest(path:string, body?:object) {
   if (!onSignOut) return localRequest(path,body);
   try { return await hostedRequest(path,body,liveToken); }
   catch (error) {
-   if ((error as {status?:number}).status===401) onSignOut();
+   const failure=error as {status?:number;reason?:string};
+   if (failure.status===401 || failure.reason==='ghl_ionos_unavailable') onSignOut(error);
    throw error;
   }
  }
@@ -292,7 +293,7 @@ function App({liveToken,onSignOut}:{liveToken?:string;onSignOut?:()=>void}){
  </aside>
  <main>
  <header className="topbar"><button className="icon nav-toggle" aria-label="Toggle navigation" onClick={()=>setSide(!side)}><Menu size={20}/></button><div className="crumb"><PanelLeft size={16}/> <span>Workspace</span><span className="slash">/</span><b>{query?'Search':nav}</b></div><div className="search"><Search size={17}/><input id="search" placeholder="Search mail, projects, attachments…" value={query} onChange={e=>{setQuery(e.target.value);setMobileRead(false);setLimit(60)}}/>{query?<button className="icon" title="Clear search" onClick={()=>setQuery('')}><X size={14}/></button>:<kbd>/</kbd>}</div><button className="theme-toggle" aria-label={theme==='dark'?'Switch to color mode':'Switch to dark mode'} onClick={()=>setTheme(theme==='dark'?'color':'dark')}>{theme==='dark'?<Moon size={15}/>:<Palette size={15}/>}<span>{theme==='dark'?'Dark mode':'Color mode'}</span></button><button className="demo-pill" onClick={()=>setMenu(menu==='sandbox'?'':'sandbox')}><i/> {liveToken?'IONOS':'Sandbox'} <ChevronDown size={12}/></button>
- {menu==='sandbox'&&<div className="popover sandbox-menu"><b>{liveToken?'IONOS Mail':'Sandbox mode'}</b><p>{liveToken?(account||connection):'Changes stay in this browser.'}</p>{liveToken?<button onClick={()=>void refreshMailbox()}>Refresh mailbox <kbd>⌘⇧R</kbd></button>:<button onClick={receive}><Inbox size={15}/> Simulate incoming mail</button>}<button disabled={!senderIdentities.length} onClick={()=>{setSignatureForm(Object.fromEntries(senderIdentities.map(identity=>[identity,signatureFor(identity)])));setMenu('')}}><Settings2 size={15}/> Email signatures</button><button onClick={()=>{setHelp(true);setMenu('')}}>Keyboard shortcuts</button>{onSignOut&&<button onClick={onSignOut}>Sign out</button>}</div>}</header>
+ {menu==='sandbox'&&<div className="popover sandbox-menu"><b>{liveToken?'IONOS Mail':'Sandbox mode'}</b><p>{liveToken?(account||connection):'Changes stay in this browser.'}</p>{liveToken?<button onClick={()=>void refreshMailbox()}>Refresh mailbox <kbd>⌘⇧R</kbd></button>:<button onClick={receive}><Inbox size={15}/> Simulate incoming mail</button>}<button disabled={!senderIdentities.length} onClick={()=>{setSignatureForm(Object.fromEntries(senderIdentities.map(identity=>[identity,signatureFor(identity)])));setMenu('')}}><Settings2 size={15}/> Email signatures</button><button onClick={()=>{setHelp(true);setMenu('')}}>Keyboard shortcuts</button>{onSignOut&&<button onClick={()=>onSignOut()}>Sign out</button>}</div>}</header>
  {nav==='Command Center'&&!query?<div className="dashboard">
  <h1>Command Center</h1>
  <div className="metrics">{([
@@ -383,7 +384,7 @@ function HostedInbox({ready,highLevelOrigins}:{ready:boolean;highLevelOrigins:st
   return ()=>controller.abort();
  },[attempt,highLevelOrigins]);
 
- if (token) return <App liveToken={token} onSignOut={()=>{setToken('');setAttempt(0)}}/>;
+ if (token) return <App liveToken={token} onSignOut={error=>{setNotice(error?highLevelSignInNotice(error):'');setToken('');setAttempt(0)}}/>;
  if (checking) return <div className="login-page" role="status">
   <div className="signature-settings signature-fields"><h1>Signing in through HighLevel…</h1>
   <button className="project-tag" onClick={()=>{setAttempt(0);setChecking(false)}}>Use mailbox password instead</button></div>

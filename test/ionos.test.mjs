@@ -220,6 +220,12 @@ test('HighLevel auto sign-in uses only a matching allowed mailbox in the approve
  const {token,email}=await result.json();
  assert.equal(email,env.IONOS_EMAIL);
  assert.equal((await call('mail',{token})).status,200);
+ const rejected=createHostedHandler(config,{mailboxFactory:()=>({mail:async()=>{
+  throw Object.assign(new Error('authentication rejected'),{authenticationFailed:true});
+ }})});
+ const rejectedResponse=await call('mail',{token},rejected);
+ assert.equal(rejectedResponse.status,401);
+ assert.equal((await rejectedResponse.json()).reason,'ghl_ionos_auth');
  const revoked=createHostedHandler({...config,GHL_IONOS_MAILBOX_PASSWORDS:'{}'},deps);
  assert.equal((await call('mail',{token},revoked)).status,401);
 });

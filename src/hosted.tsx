@@ -8,10 +8,10 @@ export async function hostedRequest(action:string, body?:object, token?:string) 
   headers:{...(token?{Authorization:'Bearer '+token}:{}),...(body?{'Content-Type':'application/json'}:{})},
   body:body?JSON.stringify(body):undefined,
  });
- const data = await response.json();
+ const data = await response.json().catch(()=>({}));
  if (!response.ok||data.error) {
   const error=new Error(data.error||'IONOS request failed.');
-  Object.assign(error,{status:response.status,reason:data.reason});
+  Object.assign(error,{status:response.status,reason:data.reason,requestId:response.headers.get('x-nf-request-id')});
   throw error;
  }
  return data;
@@ -65,6 +65,9 @@ const highLevelNotices:Record<string,string> = {
  ghl_context:'Inbox couldn’t read the HighLevel session. Check the Shared Secret for this exact Marketplace app.',
  ghl_agency:'This HighLevel agency doesn’t match GHL_COMPANY_ID.',
  ghl_location:'Open Inbox inside an approved HighLevel sub-account. Check GHL_LOCATION_IDS.',
+ ghl_ionos_auth:'HighLevel verified your account, but IONOS rejected the saved mailbox credential.',
+ ghl_ionos_unavailable:'HighLevel verified your account, but Inbox could not open the IONOS mailbox.',
+ session_expired:'Your mailbox session expired.',
  ghl_mailbox:'This HighLevel user has no matching IONOS mailbox configured for auto sign-in.',
  ghl_setup:'HighLevel auto sign-in is not configured on this deployment.',
  ghl_timeout:'HighLevel did not send a user session. Open Inbox from the installed Marketplace Custom Page and check the portal hostname.',
@@ -73,7 +76,8 @@ const highLevelNotices:Record<string,string> = {
 export function highLevelSignInNotice(error:unknown) {
  const reason=(error as {reason?:string}|null)?.reason;
  const detail=reason && Object.hasOwn(highLevelNotices,reason) ? highLevelNotices[reason] : 'Inbox couldn’t complete HighLevel sign-in.';
- return detail+' You can still sign in with your IONOS mailbox.';
+ const requestId=(error as {requestId?:string}|null)?.requestId;
+ return detail+' You can still sign in with your IONOS mailbox.'+(requestId?' Reference: '+requestId:'');
 }
 
 export function requestHighLevelContext(origins:string[],signal:AbortSignal) {
