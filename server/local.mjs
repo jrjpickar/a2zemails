@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { REQUEST_LIMIT } from './mail-attachments.mjs';
 import { createIonosMailbox, ionosConfig } from './ionos.mjs';
 
 const host = '127.0.0.1:4174';
@@ -21,7 +22,7 @@ async function readJson(req) {
  let bytes = 0;
  for await (const chunk of req) {
   bytes += chunk.length;
-  if (bytes > 256000) throw new TypeError('Message is too large.');
+  if (bytes > REQUEST_LIMIT) throw new TypeError('Message is too large.');
   chunks.push(chunk);
  }
  try { return JSON.parse(Buffer.concat(chunks).toString()); }

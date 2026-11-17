@@ -1,4 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:crypto';
+import { stagedAttachments, stagedFiles, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
+import { REQUEST_LIMIT } from '../../server/mail-attachments.mjs';
+import { mailboxPreferences } from '../../server/mail-preferences.mjs';
 import { createHighLevelLogin } from '../../server/ghl-sso.mjs';
 import { ImapFlow } from 'imapflow';
 import { createIonosMailbox, ionosConfig } from '../../server/ionos.mjs';
@@ -40,7 +43,7 @@ async function readInput(request, limit) {
  catch { throw new TypeError('Invalid request body.'); }
 }
 
-export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox}={}) {
+export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments}={}) {
  const enabled = env.A2Z_MODE==='live';
  const allowed = new Set((env.IONOS_ALLOWED_MAILBOXES||'').split(',').map(value=>value.trim().toLowerCase()).filter(Boolean));
  const ready = enabled && allowed.size>0 && (env.SESSION_SECRET||'').length>=32;
@@ -91,6 +94,29 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     error:'Sign in to your IONOS mailbox again.',
     reason:session?.highLevel?'ghl_mailbox':'session_expired',
    },401);
+   if (action==='upload' && request.method==='POST') {
+    await uploadsFactory(login.email).upload(await readInput(request,UPLOAD_REQUEST_LIMIT));
+    return reply({ok:true});
+   }
+   if (action==='preferences' && request.method==='GET') return reply(await preferencesFactory(login.email).load());
+   if (action==='draft' && request.method==='GET') {
+    const draft=await preferencesFactory(login.email).loadDraft(url.searchParams.get('id'));
+    return draft ? reply(draft) : reply({error:'This draft is no longer available.'},404);
+   }
+   if (action==='draft' && request.method==='POST') {
+    const input=await readInput(request,REQUEST_LIMIT);
+    const preferences=preferencesFactory(login.email);
+    if (input?.discard===true) {
+     await preferences.discard(input.id);
+     try { await uploadsFactory(login.email).clean(input.id); } catch { /* Draft deletion is already complete. */ }
+    } else await preferences.saveDraft(input);
+    return reply({ok:true});
+   }
+   if (action==='signature' && request.method==='POST') {
+    const input=await readInput(request,16000);
+    await preferencesFactory(login.email).saveSignature(input?.signature);
+    return reply({ok:true});
+   }
    const mailbox = mailboxFactory(configFor(login));
    if (action==='mail' && request.method==='GET') return reply(await mailbox.mail());
    if (action==='body' && request.method==='POST') {
@@ -98,11 +124,30 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const result = await mailbox.body(input?.id);
     return result ? reply(result) : reply({error:'The message is no longer in this folder. Refresh the mailbox and try again.'},404);
    }
-   if (action==='send' && request.method==='POST') return reply(await mailbox.send(await readInput(request,256000)));
+   if (action==='send' && request.method==='POST') {
+    const input=await readInput(request,REQUEST_LIMIT);
+    const staged=stagedFiles(input?.stagedAttachments);
+    if (staged.length && input.attachments?.length) throw new TypeError('Use one attachment upload method per message.');
+    const uploaded=staged.length ? await uploadsFactory(login.email).resolve(input.id?.slice(4),staged) : [];
+    const result=await mailbox.send(input,uploaded);
+    let draftCleanupFailed=false;
+    if (input.savedDraft===true) {
+     try { await preferencesFactory(login.email).discard(input.id.slice(4)); }
+     catch { draftCleanupFailed=true; }
+    }
+    if (!draftCleanupFailed && (staged.length || input.savedDraft===true)) {
+     try { await uploadsFactory(login.email).clean(input.id.slice(4)); } catch { /* SMTP has already accepted the message. */ }
+    }
+    return reply({...result,draftCleanupFailed});
+   }
    if (action==='update' && request.method==='POST') return reply(await mailbox.update(await readInput(request,4096)));
    return reply({error:'Unknown mailbox action.'},404);
   } catch(error) {
-   if (error instanceof TypeError) return reply({error:'Check your mailbox settings or message fields.'},400);
+   if (['preferences','draft','signature','upload'].includes(action)) {
+    if (error instanceof TypeError) return reply({error:error.message},400);
+    return reply({error:action==='upload'?'The file could not upload. Try attaching it again.':'Mailbox drafts or signatures could not sync. Try again.'},502);
+   }
+   if (error instanceof TypeError) return reply({error:action==='send'?error.message:'Check your mailbox settings or message fields.'},400);
    if (error.authenticationFailed || error.code==='EAUTH' || error.serverResponseCode==='AUTHENTICATIONFAILED') {
     if (session?.highLevel) {
      console.warn('[IONOS] HighLevel session accepted; IMAP rejected the configured mailbox credential.');

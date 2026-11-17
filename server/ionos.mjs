@@ -1,6 +1,7 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import nodemailer from 'nodemailer';
+import { mailAttachments } from './mail-attachments.mjs';
 import { classify } from '../src/model.mjs';
 
 const mailboxAddress = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/u;
@@ -257,7 +258,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     } finally {lock.release();}
    } finally {imap.close();}
   },
-  async send(input) {
+  async send(input, uploaded=[]) {
    const addresses = value => typeof value === 'string' ? value.split(/[,;]/).map(part=>part.trim()).filter(Boolean) : [];
    const to = addresses(input?.to), cc = addresses(input?.cc);
    const {subject,body,id} = input || {};
@@ -268,8 +269,11 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     throw new TypeError('Enter valid recipients, a subject, and a message.');
    }
    const refs = Array.isArray(input.references) ? input.references.filter(ref=>typeof ref==='string'&&messageId.test(ref)).slice(-30) : [];
+   const attachments=mailAttachments(input.attachments).map(file=>({
+    filename:file.name,content:Buffer.from(file.data,'base64'),
+   }));
    const message = {
-    from:config.email,to,cc,subject,text:body,
+    from:config.email,to,cc,subject,text:body,attachments:[...attachments,...uploaded],
     messageId:'<'+id+'@'+config.email.split('@')[1]+'>',
     references:refs,inReplyTo:refs.at(-1),disableFileAccess:true,disableUrlAccess:true,
    };

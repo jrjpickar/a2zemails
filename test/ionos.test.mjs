@@ -63,10 +63,13 @@ test('IONOS adapter reads a message and sends a signed reply using the authentic
  const result = await adapter.send({
   id:'out-12345678-1234-1234-1234-123456789012',to:'gc@builder.example',cc:'',
   subject:'Re: Invitation to bid',body,references:[id],from:'untrusted@example.com',
+  attachments:[{name:'plans.txt',data:Buffer.from('test plan').toString('base64')}],
  });
  assert.equal(outgoing.from,env.IONOS_EMAIL);
  assert.equal(outgoing.text,'We intend to bid.\n\n-- \nA2Z Operations\nEstimating');
  assert.equal(outgoing.inReplyTo,id);
+ assert.equal(outgoing.attachments[0].filename,'plans.txt');
+ assert.equal(outgoing.attachments[0].content.toString(),'test plan');
  assert.equal(result.messageId,outgoing.messageId);
  assert.equal(appendSignature('Reply','  '),'Reply');
 });
@@ -228,4 +231,62 @@ test('HighLevel auto sign-in uses only a matching allowed mailbox in the approve
  assert.equal((await rejectedResponse.json()).reason,'ghl_ionos_auth');
  const revoked=createHostedHandler({...config,GHL_IONOS_MAILBOX_PASSWORDS:'{}'},deps);
  assert.equal((await call('mail',{token},revoked)).status,401);
+});
+
+test('saved drafts keep attachments and signatures under the authenticated mailbox', async () => {
+ const {mailboxPreferences}=await import('../server/mail-preferences.mjs');
+ const records=new Map();
+ const store={
+  async get(key) {return records.get(key)?.data??null;},
+  async getMetadata(key) {return records.get(key)||null;},
+  async list({prefix}) {return {blobs:[...records.keys()].filter(key=>key.startsWith(prefix)).map(key=>({key}))};},
+  async setJSON(key,data,{metadata}={}) {records.set(key,{data,metadata});},
+  async delete(key) {records.delete(key);},
+ };
+ const first=mailboxPreferences('one@example.com',store);
+ const second=mailboxPreferences('two@example.com',store);
+ const id='0d8bac5c-d3f4-4fa5-ad0b-e967daee3afd';
+ const attachments=[{name:'plans.txt',data:Buffer.from('test plans').toString('base64')}];
+ await first.saveDraft({id,to:'gc@example.com',cc:'',subject:'Revised plans',body:'Draft message',attachments,identity:'two@example.com'});
+ await first.saveSignature('Operations\nA2Z Construction');
+ await second.saveSignature('');
+ const firstSummary=await first.load();
+ assert.equal(firstSummary.signature,'Operations\nA2Z Construction');
+ assert.equal(firstSummary.drafts[0].subject,'Revised plans');
+ assert.equal(firstSummary.drafts[0].attachments,undefined);
+ const opened=await first.loadDraft(id);
+ assert.deepEqual(opened.attachments,attachments);
+ assert.equal(opened.identity,'one@example.com');
+ assert.equal(await second.loadDraft(id),null);
+ assert.deepEqual(await second.load(),{drafts:[],signature:''});
+ await first.discard(id);
+ assert.deepEqual((await first.load()).drafts,[]);
+ assert.equal((await first.load()).signature,'Operations\nA2Z Construction');
+});
+
+test('large staged attachments are reassembled in order and isolated by draft and mailbox', async () => {
+ const {stagedAttachments,CHUNK_BYTES,MAX_STAGED_BYTES}=await import('../server/staged-attachments.mjs');
+ const records=new Map();
+ const store={
+  async set(key,data){records.set(key,data);},
+  async get(key){return records.get(key)||null;},
+  async list({prefix}){return {blobs:[...records.keys()].filter(key=>key.startsWith(prefix)).map(key=>({key}))};},
+  async delete(key){records.delete(key);},
+ };
+ const uploads=stagedAttachments('one@example.com',store);
+ const other=stagedAttachments('two@example.com',store);
+ const id='0d8bac5c-d3f4-4fa5-ad0b-e967daee3afd';
+ const file={id:'12345678-1234-4321-8999-123456789012',name:'project-plans.pdf',size:CHUNK_BYTES+5};
+ const start=Buffer.alloc(CHUNK_BYTES,0x24);
+ const tail=Buffer.from('tail!');
+ await uploads.upload({draftId:id,file,index:0,data:start.toString('base64')});
+ await assert.rejects(uploads.resolve(id,[file]),/did not finish uploading/);
+ await uploads.upload({draftId:id,file,index:1,data:tail.toString('base64')});
+ const [attachment]=await uploads.resolve(id,[file]);
+ assert.equal(attachment.filename,'project-plans.pdf');
+ assert.deepEqual(attachment.content,Buffer.concat([start,tail]));
+ await assert.rejects(other.resolve(id,[file]),/did not finish uploading/);
+ await assert.rejects(uploads.resolve(id,[{...file,size:MAX_STAGED_BYTES+1}]),/24 MB/);
+ await uploads.clean(id);
+ assert.equal(records.size,0);
 });
