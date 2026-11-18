@@ -79,7 +79,16 @@ async function localRequest(path:string, body?:object) {
  return data;
 }
 const day=(v:string)=>new Date(v).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
-const time=(v:string)=>v.slice(0,10)==='2026-11-17'?new Date(v).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}):new Date(v).toLocaleDateString('en-US',{month:'short',day:'numeric'});
+const messageDate=new Intl.DateTimeFormat('en-US',{month:'short',day:'numeric'});
+const messageTime=new Intl.DateTimeFormat('en-US',{hour:'numeric',minute:'2-digit'});
+const fullMessageDate=new Intl.DateTimeFormat('en-US',{dateStyle:'full',timeStyle:'long'});
+function MessageTimestamp({value}:{value:string}) {
+ const date=new Date(value);
+ if (Number.isNaN(date.getTime())) return null;
+ return <time dateTime={date.toISOString()} title={fullMessageDate.format(date)}>
+  {messageTime.format(date)} · {messageDate.format(date)}
+ </time>;
+}
 const initials=(name:string)=>name.split(' ').slice(0,2).map(s=>s[0]).join('');
 const avatarColors=['sand','lavender','sage','peach','sky'];
 function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveToken?:string;onSignOut?:(error?:unknown)=>Promise<void>;largeUploads?:boolean;contactLookup?:boolean}){
@@ -593,7 +602,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   if (!cards.length) return null;
   return <section className="attachments thread-attachments"><h3><Paperclip size={15}/> Attachments <span>{cards.length}</span></h3>
    <div>{cards.map(({key,name,message,open})=><button type="button" key={key} onClick={open}>
-    <span className="file-icon"><FileText size={19}/></span><span><b>{name}</b><small>{message.name} · {time(message.date)}</small></span><Download size={16}/>
+    <span className="file-icon"><FileText size={19}/></span><span><b>{name}</b><small>{message.name} · <MessageTimestamp value={message.date}/></small></span><Download size={16}/>
    </button>)}</div>
   </section>;
  }
@@ -676,7 +685,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <div className="rows">
  {nav==='Drafts'&&!query?draftList.length?draftList.map(d=><button className="draft-row" key={d.id} disabled={saving} onClick={()=>reopenDraft(d.id)}><span className="tag rose">Draft</span><b>{d.subject||'(No subject)'}</b><span>{d.to||'No recipient'}</span></button>):<div className="empty">{draftSyncError||'No drafts yet.'}{draftSyncError&&<button className="project-tag" onClick={()=>void syncPreferences()}>Retry</button>}</div>:list.length?list.slice(0,limit).map((m,i)=><div key={m.id} className={'mail-row '+(m.id===currentRow?.id?'selected ':'')+(m.unread?'unread':'')}>
  <div className="row-side"><input type="checkbox" disabled={!!liveToken} aria-label={'Select '+m.subject} checked={marked.includes(m.id)} onChange={e=>setMarked(e.target.checked?[...marked,m.id]:marked.filter(x=>x!==m.id))}/><button className={'star '+(m.star?'starred':'')} disabled={!!liveToken&&m.id.startsWith('out-')} title={m.star?'Remove star':'Star message'} onClick={()=>change([m.id],{star:!m.star})}><Star size={14}/></button></div>
- <button className="row-content" onClick={()=>open(m)}><div className="row-top"><span className={'avatar mini '+avatarColors[i%5]}>{initials(m.name)}</span><b>{m.folder==='Sent'?'To: '+m.to:m.name}</b><time>{time(m.date)}</time></div><strong>{m.subject}</strong><p>{m.body.replace(/\s+/g,' ')}</p><div className="row-foot">{tag(m)}{m.folder!=='Inbox'&&<span className="tag gray">{m.folder}</span>}{m.files.length>0&&<span className="paper-count"><Paperclip size={13}/>{m.files.length}</span>}{m.unread&&<i className="unread-dot"/>}</div></button>
+ <button className="row-content" onClick={()=>open(m)}><div className="row-top"><span className={'avatar mini '+avatarColors[i%5]}>{initials(m.name)}</span><b>{m.folder==='Sent'?'To: '+m.to:m.name}</b><MessageTimestamp value={m.date}/></div><strong>{m.subject}</strong><p>{m.body.replace(/\s+/g,' ')}</p><div className="row-foot">{tag(m)}{m.folder!=='Inbox'&&<span className="tag gray">{m.folder}</span>}{m.files.length>0&&<span className="paper-count"><Paperclip size={13}/>{m.files.length}</span>}{m.unread&&<i className="unread-dot"/>}</div></button>
  {m.folder!=='Trash'&&(!liveToken||!m.id.startsWith('out-'))&&<button type="button" className="icon row-delete" title="Move to Trash" aria-label={'Move to Trash: '+m.subject} onClick={()=>void move([m.id],'Trash')}><Trash2 size={16}/></button>}
  </div>):<div className="empty">No messages match this view.</div>}
  {list.length>limit&&<button className="load" onClick={()=>setLimit(limit+60)}>Load more messages</button>}</div>
@@ -684,12 +693,12 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  </section>
  <section className="reader">{currentRow?<><div className="reader-tools"><button className="icon back" title="Back to messages" onClick={()=>setMobileRead(false)}><ChevronLeft size={19}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Archive" onClick={()=>move([currentRow.id],'Archive')}><Archive size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Trash" onClick={()=>move([currentRow.id],'Trash')}><Trash2 size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.unread?'Mark read':'Mark unread'} onClick={()=>change([currentRow.id],{unread:!currentRow.unread})}>{currentRow.unread?<MailOpen size={18}/>:<Mail size={18}/>}</button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Move message" onClick={()=>setMenu(menu==='move'?'':'move')}><MoreHorizontal size={20}/></button>{currentRow.folder!=='Inbox'&&currentRow.folder!=='Sent'&&<button className="icon" title="Restore message" onClick={()=>move([currentRow.id],currentRow.previousFolder==='Sent'?'Sent':'Inbox')}><RotateCcw size={17}/></button>}{menu==='move'&&<div className="popover move">{['Inbox','Archive','Trash','Spam'].map(f=><button key={f} onClick={()=>move([currentRow.id],f)}>Move to {f}</button>)}</div>}<span className="tool-space"/><span className="position">{list.findIndex(m=>m.id===currentRow.id)+1} of {list.length}</span><button className="icon next" title="Previous message" disabled={list[0]===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)-1];if(p)open(p)}}><ChevronLeft size={18}/></button><button className="icon next next-right" title="Next message" disabled={list.at(-1)===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)+1];if(p)open(p)}}><ChevronLeft size={18}/></button></div>
  <div className="reader-scroll"><div className="reader-content"><div className="subject-line"><h2>{currentRow.subject}</h2><button className={'star '+(currentRow.star?'starred':'')} disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Toggle message star" onClick={()=>change([currentRow.id],{star:!currentRow.star})}><Star size={20}/></button></div><div className="reader-tags">{tag(currentRow)}{project&&<button className="project-tag" onClick={()=>{go('Active Projects');setProjectFilter(project.id)}}><FolderKanban size={13}/>{project.name}</button>}</div>
- <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}{currentRow.folder==='Sent'&&currentRow.bcc&&' · Bcc: '+currentRow.bcc}</small></div><time>{time(currentRow.date)}</time></div>
+ <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}{currentRow.folder==='Sent'&&currentRow.bcc&&' · Bcc: '+currentRow.bcc}</small></div><MessageTimestamp value={currentRow.date}/></div>
  {renderAttachments([currentRow,...newest.slice().reverse()])}
  {currentRow.due&&<div className="deadline"><div className="deadline-icon"><Clock3 size={19}/></div><div><b>Bid submission deadline</b><span>{day(currentRow.due+'T12:00:00')}</span></div><span className="tag gold">Open bid</span></div>}
  {renderBody(currentRow)}
  <div className="reply-actions desktop-replies">{replyButtons(currentRow)}</div>
- {newest.length>0&&<section className="thread"><h3>Conversation · {related.length} messages</h3>{newest.map(m=><details key={m.id} onToggle={e=>{if(e.currentTarget.open&&m.needsBody&&!bodies[m.id])void loadBody(m).catch(()=>{})}}><summary>{m.name} · {time(m.date)}</summary>{renderBody(m)}</details>)}</section>}
+ {newest.length>0&&<section className="thread"><h3>Conversation · {related.length} messages</h3>{newest.map(m=><details key={m.id} onToggle={e=>{if(e.currentTarget.open&&m.needsBody&&!bodies[m.id])void loadBody(m).catch(()=>{})}}><summary>{m.name} · <MessageTimestamp value={m.date}/></summary>{renderBody(m)}</details>)}</section>}
  <div className="metadata" hidden={!!liveToken}><label>Project<select value={currentRow.project} onChange={e=>{change([currentRow.id],{project:e.target.value});setToast('Project assignment saved')}}><option value="">Unassigned</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><label>Category<select value={currentRow.category} onChange={e=>{change([currentRow.id],{category:e.target.value});setToast('Category corrected')}}>{categories.map(c=><option key={c}>{c}</option>)}</select></label><button onClick={()=>{const domain=currentRow.from.split('@')[1];setState(s=>({...s,rules:{...s.rules,[domain]:currentRow.category}}));setToast('Rule saved for future messages from '+domain)}}>Remember sender domain rule</button></div>
  </div></div><nav className="mobile-dock mobile-replies" aria-label="Message actions">{replyButtons(currentRow)}</nav></>:<div className="reader-empty"><Inbox size={29}/><h2>Select a message</h2><p>Open a conversation to read it here.</p></div>}</section>
  </div>}
