@@ -121,6 +121,6 @@ Keep the bucket private. Enable lifecycle cleanup for incomplete multipart uploa
 
 ## Bcc and HighLevel recipient lookup
 
-Use **Bcc** in Compose for blind recipients. Bcc is saved with drafts and appears in your Sent copy, while outgoing SMTP uses it only in the delivery envelope. Reply All never adds Bcc recipients.
+To, Cc, and Bcc each accept multiple addresses. Type an address and press Enter, choose a suggestion, or paste addresses separated by commas, semicolons, or newlines. Use **Bcc** in Compose for blind recipients. Bcc is saved with drafts and appears in your Sent copy, while outgoing SMTP uses it only in the delivery envelope. Reply All never adds Bcc recipients.
 
 To enable CRM suggestions in **To**, create a HighLevel **sub-account Private Integration Token** with only `contacts.readonly`. Set `GHL_CONTACTS_PIT_TOKEN` for Production → Functions in Netlify and redeploy. If `GHL_LOCATION_IDS` contains exactly one location, lookup uses it. Otherwise set `GHL_CONTACTS_LOCATION_ID` to the location the PIT belongs to. The app searches that one sub-account for signed-in mailbox users. For embedded HighLevel sessions, their active location must match the configured lookup location. Lookup returns names and email addresses only. If HighLevel is unavailable, mailbox suggestions and manual entry still work. [HighLevel Search Contacts](https://marketplace.gohighlevel.com/docs/ghl/contacts/search-contacts-advanced/index.html)
