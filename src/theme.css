@@ -247,3 +247,23 @@ select, kbd, .project-tag, .gray, .attachments h3 span, .chips button { backgrou
  .compose-panel .recipient-label { min-height:42px; }
  .recipient-token { min-height:29px; font-size:12px; }
 }
+
+.signature-fields .remember-mailbox {
+ display: flex;
+ align-items: center;
+ gap: 8px;
+}
+.signature-fields .remember-mailbox input {
+ width: auto;
+ accent-color: var(--accent);
+}
+.mail-row .row-delete {
+ flex: 0 0 auto;
+ align-self: center;
+ margin-right: 8px;
+}
+@media (hover: hover) and (pointer: fine) {
+ .mail-row .row-delete { opacity: 0; }
+ .mail-row:hover .row-delete, .mail-row:focus-within .row-delete { opacity: 1; }
+}
+.thread-attachments { margin-bottom: 16px; }

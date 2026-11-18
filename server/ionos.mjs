@@ -4,7 +4,7 @@ import nodemailer from 'nodemailer';
 import { safeRasterType,signatureImage } from './signature-image.mjs';
 import { MAX_STAGED_BYTES } from './staged-attachments.mjs';
 import { mailAttachments } from './mail-attachments.mjs';
-import { classify } from '../src/model.mjs';
+import { classify,matchProject } from '../src/model.mjs';
 
 const mailboxAddress = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/u;
 const messageId = /^<[^<>\s]+>$/u;
@@ -15,6 +15,8 @@ const folderAliases = new Map([
  ['inbox','Inbox'], ['sent','Sent'], ['sent items','Sent'], ['archive','Archive'],
  ['trash','Trash'], ['deleted items','Trash'], ['spam','Spam'], ['junk','Spam'],
 ]);
+const folderName = entry => standardFolders.get(entry.specialUse) || folderAliases.get(entry.path.toLowerCase()) || entry.path;
+const isMailFolder = entry => !entry.flags.has('\\Noselect') && entry.specialUse !== '\\Drafts' && !/(?:^|[./])drafts$/i.test(entry.path);
 
 export function ionosConfig(env) {
  if (env.A2Z_MODE !== 'live' || env.A2Z_ENABLE_LIVE !== 'true') {
@@ -142,12 +144,11 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   let previewBudget = 3_000_000;
   try {
    await imap.connect();
-   const folders = await imap.list();
+   const folders = (await imap.list()).filter(isMailFolder);
    const priority = entry => entry.path.toUpperCase()==='INBOX'?0:entry.specialUse==='\\Sent'?1:2;
    folders.sort((a,b)=>priority(a)-priority(b));
    for (const entry of folders) {
-    if (entry.flags.has('\\Noselect') || entry.specialUse === '\\Drafts' || /(?:^|[./])drafts$/i.test(entry.path)) continue;
-    const folder = standardFolders.get(entry.specialUse) || folderAliases.get(entry.path.toLowerCase()) || entry.path;
+    const folder = folderName(entry);
     const lock = await imap.getMailboxLock(entry.path, {readOnly:true});
     try {
      const {exists,uidValidity} = imap.mailbox;
@@ -156,13 +157,14 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
      const range = Math.max(1,exists-count+1)+':'+exists;
      const metadata = await imap.fetchAll(range,{uid:true,envelope:true,internalDate:true,flags:true,size:true,bodyStructure:true});
      const eligible = metadata.slice().reverse().filter(item=>{
-      if (item.size>768000 || item.size>previewBudget) return false;
+      if (item.flags.has('\\Deleted') || item.size>768000 || item.size>previewBudget) return false;
       previewBudget -= item.size;
       return true;
      }).map(item=>item.uid);
      const sources = eligible.length ? await imap.fetchAll(eligible,{uid:true,source:true},{uid:true}) : [];
      const rawByUid = new Map(sources.map(item=>[item.uid,item.source]));
      for (const item of metadata) {
+      if (item.flags.has('\\Deleted')) continue;
       const raw = rawByUid.get(item.uid);
       const parsed = raw ? await parser(raw,{skipHtmlToText:false,skipImageLinks:true}).catch(()=>null) : null;
       const {envelope}=item;
@@ -187,7 +189,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
        id, thread:references[0]||headerId||id, name:envelope?.from?.[0]?.name||from||'Unknown sender',
        company:'', subject, body, needsBody, date:item.internalDate?.toISOString()||new Date(0).toISOString(),
        from,to:addressList(envelope?.to),cc:addressList(envelope?.cc),bcc:folder==='Sent'?(addressList(envelope?.bcc)||addressList(parsed?.bcc?.value)):'',
-       category,project:'',folder,unread:!item.flags.has('\\Seen'),star:item.flags.has('\\Flagged'),
+       category,project:matchProject(subject+' '+body),folder,unread:!item.flags.has('\\Seen'),star:item.flags.has('\\Flagged'),
        files:attachments.length?attachments.map(file=>file.name):(parsed?.attachments||[]).map(file=>file.filename||'Attachment'),attachments,
        due:category==='Bid Invitations'?bidDue(subject,body):undefined,
        headers:{messageId:headerId,references},
@@ -195,7 +197,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
      }
     } finally { lock.release(); }
    }
-   return {email:config.email,contacts:[...contacts.values()],mail:mail.sort((a,b)=>b.date.localeCompare(a.date))};
+   return {email:config.email,folders:[...new Set(folders.map(folderName))],contacts:[...contacts.values()],mail:mail.sort((a,b)=>b.date.localeCompare(a.date))};
   } finally { imap.close(); }
  }
 
@@ -374,7 +376,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    const match = typeof input?.id==='string' && input.id.match(/^(.+):(\d+):(\d+)$/s);
    const patches = {read:'\\Seen',unread:'\\Seen',star:'\\Flagged',unstar:'\\Flagged'};
    const flag = Object.hasOwn(patches,input?.action) ? patches[input.action] : '';
-   const destination = ['Inbox','Archive','Trash','Spam'].includes(input?.destination) ? input.destination : '';
+   const destination = ['Inbox','Sent','Archive','Trash','Spam'].includes(input?.destination) ? input.destination : '';
    if (!match || (!flag && !(input.action==='move' && destination))) throw new TypeError('Invalid mailbox action.');
    const [,path,generation,uid] = match;
    const imap = new Imap(config.imap);
@@ -383,13 +385,15 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     await imap.connect();
     const folders = await imap.list();
     const target = destination && folders.find(entry=>!entry.flags.has('\\Noselect') &&
-     (standardFolders.get(entry.specialUse)||folderAliases.get(entry.path.toLowerCase()))===destination);
+     folderName(entry)===destination);
     if (destination && !target) return {error:'That folder is unavailable in IONOS.'};
     const lock = await imap.getMailboxLock(path);
     try {
      if (String(imap.mailbox.uidValidity)!==generation) return {error:'The mailbox changed. Refresh and try again.'};
      if (target) {
-      if (target.path!==path) await imap.messageMove(uid,target.path,{uid:true});
+      if (target.path!==path && !await imap.messageMove(uid,target.path,{uid:true})) {
+       return {error:'The message could not be moved. Refresh the mailbox and try again.'};
+      }
      } else if (['read','star'].includes(input.action)) {
       await imap.messageFlagsAdd(uid,[flag],{uid:true});
      } else {

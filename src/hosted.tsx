@@ -1,11 +1,12 @@
 import {useState,type FormEvent} from 'react';
 
+export const rememberedSession='MailboxCookie';
 export const hostedEndpoint='/.netlify/functions/ionos';
 
 export async function hostedRequest(action:string, body?:object, token?:string, signal?:AbortSignal) {
  const response = await fetch(hostedEndpoint+'?action='+action,{
   method:body?'POST':'GET',cache:'no-store',signal,
-  headers:{...(token?{Authorization:'Bearer '+token}:{}),...(body?{'Content-Type':'application/json'}:{})},
+  headers:{...(token?{Authorization:token===rememberedSession?token:'Bearer '+token}:{}),...(body?{'Content-Type':'application/json'}:{})},
   body:body?JSON.stringify(body):undefined,
  });
  const data = await response.json().catch(()=>({}));
@@ -29,7 +30,7 @@ export function MailboxLogin({ready,onLogin,notice,retry}:{ready:boolean;onLogin
   setBusy(true);
   setError('');
   try {
-   const data=await hostedRequest('login',{email:fields.get('email'),password:fields.get('password')});
+   const data=await hostedRequest('login',{email:fields.get('email'),password:fields.get('password'),remember:fields.has('remember')});
    onLogin(data.token);
   } catch (error) {
    setError(error instanceof Error?error.message:'Unable to sign in.');
@@ -54,6 +55,9 @@ export function MailboxLogin({ready,onLogin,notice,retry}:{ready:boolean;onLogin
     <button type="button" className="project-tag" aria-pressed={showPassword} disabled={!ready||busy}
      onClick={()=>setShowPassword(value=>!value)}>{showPassword?'Hide password':'Show password'}</button>
    </div>
+   {window.parent===window&&<label className="remember-mailbox">
+    <input name="remember" type="checkbox" disabled={!ready||busy}/> Remember me for 7 days on this browser
+   </label>}
    {(!ready||error)&&<p role="alert">{error||'This deployment needs a session secret and allowed mailbox addresses.'}</p>}
    <button className="send" disabled={!ready||busy}>{busy?'Signing in…':'Sign in'}</button>
   </div>

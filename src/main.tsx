@@ -9,7 +9,7 @@ import {AttachmentPreview,type MailAttachment,type ForwardedAttachment} from './
 import {useComposePosition} from './compose-position';
 import {MessageText} from './message-text';
 import {RecipientInput,type Contact} from './recipient-input';
-import {hostedEndpoint,hostedRequest,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
+import {rememberedSession,hostedRequest,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
 import './style.css';
 import './theme.css';
 type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
@@ -17,12 +17,29 @@ type Upload={name:string;data:string;size?:number};
 type StagedUpload={id:string;name:string;size:number};
 type SavedDraft={id:string;to:string;subject:string;updatedAt:string};
 type Draft={id:string;to:string;cc:string;bcc?:string;subject:string;body:string;files:string[];thread?:string;parent?:Pick<Message,'project'|'headers'>;identity:string;includeSignature?:boolean;attachments?:Upload[];stagedAttachments?:StagedUpload[];forwardedAttachments?:ForwardedAttachment[];largeFiles?:LargeFile[]};
+function draftHasContent(draft:Draft) {
+ return Boolean(draft.to||draft.cc||draft.bcc||draft.subject||draft.body||draft.files.length||
+  draft.attachments?.length||draft.stagedAttachments?.length||draft.forwardedAttachments?.length||draft.largeFiles?.length);
+}
+const draftStoragePrefix=(account:string)=>'a2z-draft:'+account+':';
+function recoverDrafts(account:string):Draft[] {
+ try {
+  const prefix=draftStoragePrefix(account);
+  return Object.keys(sessionStorage).filter(key=>key.startsWith(prefix)).map(key=>JSON.parse(sessionStorage.getItem(key)||'null')).filter(Boolean);
+ } catch { return []; }
+}
+function clearDraftRecovery(draft:Draft, payload?:string) {
+ try {
+  const key=draftStoragePrefix(draft.identity)+draft.id;
+  if (payload===undefined||sessionStorage.getItem(key)===payload) sessionStorage.removeItem(key);
+ } catch {}
+}
 type State={mail:Message[];rules:Record<string,string>;drafts:Draft[];signatures?:Record<string,string>;signatureImages?:Record<string,string>};
 const samples=seed as Message[];
 const demo='operations@a2z.example';
 const identities=[demo,'estimating@a2z.example'];
 const groups=[
- {label:'WORKSPACE', links:[['Command Center',LayoutDashboard],['Bid Invitations',ClipboardList],['Active Projects',FolderKanban],['Estimating',Calculator],['RFIs & Change Orders',FileQuestion],['Dispatch',HardHat],['Invoices',Receipt]]},
+ {label:'WORKSPACE', links:[['Command Center',LayoutDashboard],['Bid Invitations',ClipboardList],['Active Projects',FolderKanban],['Estimating',Calculator],['RFIs & Change Orders',FileQuestion],['Dispatch',HardHat],['Invoices',Receipt],['General',Mail]]},
  {label:'MAILBOX',links:[['Inbox',Inbox],['Sent',Send],['Drafts',FileText],['Archive',Archive],['Trash',Trash2],['Spam',ShieldAlert]]}
 ] as const;
 const tags:Record<string,string>={'Bid Invitations':'Bid Invitation','Estimating':'Estimating','RFIs & Change Orders':'RFI / Change Order','Dispatch':'Dispatch','Invoices':'Invoices','General':'General'};
@@ -65,7 +82,7 @@ const day=(v:string)=>new Date(v).toLocaleDateString('en-US',{month:'short',day:
 const time=(v:string)=>v.slice(0,10)==='2026-11-17'?new Date(v).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}):new Date(v).toLocaleDateString('en-US',{month:'short',day:'numeric'});
 const initials=(name:string)=>name.split(' ').slice(0,2).map(s=>s[0]).join('');
 const avatarColors=['sand','lavender','sage','peach','sky'];
-function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveToken?:string;onSignOut?:(error?:unknown)=>void;largeUploads?:boolean;contactLookup?:boolean}){
+function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveToken?:string;onSignOut?:(error?:unknown)=>Promise<void>;largeUploads?:boolean;contactLookup?:boolean}){
  const [knownContacts,setKnownContacts]=useState<Contact[]>([]);
  const lookupContacts=React.useCallback(async(query:string,signal:AbortSignal):Promise<Contact[]>=>{
   const result=await hostedRequest('contacts',{query},liveToken,signal);
@@ -76,7 +93,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   try { return await hostedRequest(path,body,liveToken); }
   catch (error) {
    const failure=error as {status?:number;reason?:string};
-   if (failure.status===401 || failure.reason==='ghl_ionos_unavailable') onSignOut(error);
+   if (failure.status===401 || failure.reason==='ghl_ionos_unavailable') void onSignOut(error).catch(()=>setToast('Your session ended. Reload to sign in again.'));
    throw error;
   }
  }
@@ -88,12 +105,15 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const [signatureImageForm,setSignatureImageForm]=useState<Record<string,string>>({});
  const [signatureForm,setSignatureForm]=useState<Record<string,string>|null>(null);
  const [account,setAccount]=useState('');
+ const [mailFolders,setMailFolders]=useState<string[]>([]);
  const [connection,setConnection]=useState(liveToken?'Connecting to IONOS…':'');
  const [sending,setSending]=useState(false);
  const hosted=Boolean(onSignOut);
  const [saving,setSaving]=useState(false);
  const [draftSaveState,setDraftSaveState]=useState('');
  const lastSaved=React.useRef('');
+ const reopenedDraft=React.useRef('');
+ const latestDraftPayload=React.useRef('');
  const autoSave=React.useRef<Promise<void>|null>(null);
  const [draggingFiles,setDraggingFiles]=useState(false);
  const [uploadProgress,setUploadProgress]=useState('');
@@ -114,15 +134,25 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   try { localStorage.setItem('a2z-theme',theme); } catch {}
  },[theme]);
 
- const refreshing = React.useRef(false);
- async function refreshMailbox() {
-  if (refreshing.current) return;
-  refreshing.current=true;
+ const refreshing = React.useRef<Promise<void>|null>(null);
+ const mailboxRevision = React.useRef(0);
+ const moving = React.useRef(new Set<string>());
+ function refreshMailbox() {
+  if (refreshing.current) return refreshing.current;
+  const revision=mailboxRevision.current;
+  const pending=fetchMailbox(revision).finally(()=>{refreshing.current=null});
+  refreshing.current=pending;
+  return pending;
+ }
+ async function fetchMailbox(revision:number) {
   setConnection('Connecting to IONOS…');
   try {
-   const data: {email:string;mail:Message[];contacts:Contact[]} = await liveRequest('mail');
+   const data: {email:string;mail:Message[];contacts:Contact[];folders?:string[]} = await liveRequest('mail');
+   if (revision!==mailboxRevision.current) return;
    setKnownContacts(data.contacts||[]);
    setAccount(data.email);
+   setMailFolders((data.folders||[]).filter(folder=>!groups[1].links.some(([name])=>name===folder))
+    .sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'})));
    setState(previous=>({...previous,mail:[
     ...data.mail,
     ...previous.mail.filter(message=>message.folder==='Sent' && message.id.startsWith('out-') &&
@@ -132,7 +162,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    setConnection('IONOS connected');
   } catch (error) {
    setConnection(error instanceof Error ? error.message : 'Unable to connect to IONOS.');
-  } finally {refreshing.current=false;}
+  }
  }
  useEffect(()=>{if(liveToken)void refreshMailbox()},[]);
  async function syncPreferences() {
@@ -148,76 +178,88 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    if (prefsVersion.current===version) setDraftSyncError(error instanceof Error?error.message:'Could not load saved drafts.');
   }
  }
- useEffect(()=>{if(account&&hosted)void syncPreferences()},[account,hosted]);
+ useEffect(()=>{
+  if (!account||!liveToken) return;
+  const recovered=recoverDrafts(account);
+  if (recovered.length) setState(previous=>({...previous,drafts:recovered}));
+  if (hosted) void syncPreferences();
+ },[account,hosted,liveToken]);
  const mail=state.mail;
  const row=mail.find(m=>m.id===selected);
  const draft=state.drafts.find(d=>d.id===compose);
  const composeWindow=useComposePosition(draft?.id);
  const draftPayload=draft?JSON.stringify(draft):'';
- const hasDraftContent=Boolean(draft&&(draft.to||draft.cc||draft.bcc||draft.subject||draft.body||draft.files.length||
-  draft.attachments?.length||draft.stagedAttachments?.length||draft.forwardedAttachments?.length||draft.largeFiles?.length));
+ const isSavedDraft=Boolean(draft&&(reopenedDraft.current===draft.id||savedDrafts.some(item=>item.id===draft.id)));
+ const shouldSaveDraft=Boolean(draft&&(isSavedDraft||draftHasContent(draft)));
+
+ React.useLayoutEffect(()=>{
+  latestDraftPayload.current=draftPayload;
+  if (!liveToken||!draft) return;
+  if (!shouldSaveDraft) {
+   clearDraftRecovery(draft);
+   return;
+  }
+  if (hosted&&lastSaved.current===draftPayload) return;
+  try { sessionStorage.setItem(draftStoragePrefix(draft.identity)+draft.id,draftPayload); }
+  catch { setDraftSaveState('Browser recovery unavailable'); }
+ },[draftPayload,shouldSaveDraft,liveToken,hosted]);
 
  async function persistDraft(current:Draft) {
   const payload=JSON.stringify(current);
   if (lastSaved.current===payload) return;
+  reopenedDraft.current=current.id;
   ++prefsVersion.current;
   await liveRequest('draft',current);
   lastSaved.current=payload;
+  clearDraftRecovery(current,payload);
   const summary={id:current.id,subject:current.subject,to:current.to,updatedAt:new Date().toISOString()};
   setSavedDrafts(previous=>[summary,...previous.filter(item=>item.id!==current.id)]);
  }
 
  useEffect(()=>{
-  if (!hosted || !draft || !hasDraftContent || saving || sending || lastSaved.current===draftPayload) return;
+  if (!hosted || !draft || !shouldSaveDraft || saving || sending || lastSaved.current===draftPayload) return;
   setDraftSaveState('Unsaved changes');
   const timer=window.setTimeout(()=>{
    if (writing.current||sendingRef.current) return;
    const pending=(autoSave.current||Promise.resolve()).then(()=>{
     if (writing.current||sendingRef.current) return;
     setDraftSaveState('Saving draft…');
-    return persistDraft(draft).then(()=>setDraftSaveState('Draft saved')).catch(()=>setDraftSaveState('Draft not saved · use Save draft to retry'));
+    return persistDraft(draft).then(()=>{
+     if (latestDraftPayload.current===draftPayload) setDraftSaveState('Draft saved');
+    }).catch(()=>{
+     if (latestDraftPayload.current===draftPayload) setDraftSaveState('Draft not saved · use Save draft to retry');
+    });
    });
    autoSave.current=pending;
    void pending.finally(()=>{if(autoSave.current===pending)autoSave.current=null});
   },700);
   return ()=>window.clearTimeout(timer);
- },[draftPayload,hosted,hasDraftContent,saving,sending]);
+ },[draftPayload,hosted,shouldSaveDraft,saving,sending]);
 
- useEffect(()=>{
-  if (!hosted||!liveToken||!hasDraftContent) return;
-  // A small final update can outlive tab navigation. Normal autosaves cover larger drafts.
-  const flush=()=>{
-   if (document.visibilityState!=='hidden' || writing.current||sendingRef.current||
-       autoSave.current||lastSaved.current===draftPayload||new Blob([draftPayload]).size>56000) return;
-   void fetch(hostedEndpoint+'?action=draft',{
-    method:'POST',keepalive:true,
-    headers:{Authorization:'Bearer '+liveToken,'Content-Type':'application/json'},body:draftPayload,
-   }).catch(()=>{});
-  };
-  document.addEventListener('visibilitychange',flush);
-  window.addEventListener('pagehide',flush);
-  return ()=>{
-   document.removeEventListener('visibilitychange',flush);
-   window.removeEventListener('pagehide',flush);
-  };
- },[draftPayload,hasDraftContent,hosted,liveToken]);
- const draftList=hosted?savedDrafts:state.drafts;
+ const openDrafts=state.drafts.filter(item=>item.id!==draft?.id||shouldSaveDraft);
+ const draftList=hosted?[...openDrafts,...savedDrafts.filter(item=>!openDrafts.some(open=>open.id===item.id))]:openDrafts;
  const inbox=mail.filter(m=>m.folder==='Inbox');
- const unread=mail.filter(m=>m.unread).length;
  const unreadIncoming=inbox.filter(m=>m.unread).length;
  const queues=dashboardQueues(mail) as Record<'bids'|'urgent'|'unanswered'|'invoices',Message[]>;
  const contacts=liveToken?knownContacts:samples.map(m=>({address:m.from,name:m.name}));
  useEffect(()=>{if(liveToken)return;try{localStorage.setItem(storageKey,JSON.stringify(state))}catch{setToast('Browser storage is full. Changes are available until you reload.')}},[state]);
  useEffect(()=>{if(!toast)return;let id=setTimeout(()=>setToast(''),3200);return()=>clearTimeout(id)},[toast]);
+ const customFolderPrefix='folder:';
+ const viewName=nav.startsWith(customFolderPrefix)?nav.slice(customFolderPrefix.length):nav;
+ function inFolder(message:Message, folder:string) {
+  if (folder.startsWith(customFolderPrefix)) return message.folder===folder.slice(customFolderPrefix.length);
+  if (folder==='Active Projects') return Boolean(message.project)&&!['Trash','Spam'].includes(message.folder);
+  if (categories.includes(folder)) return message.category===folder&&!['Trash','Spam'].includes(message.folder);
+  return message.folder===folder;
+ }
  const list=useMemo(()=>mail.filter(m=>{
   if(query.trim())return searchMail(m,query);
-  const inView=nav==='Inbox'||(nav==='Active Projects'
-   ? !!m.project && !['Trash','Spam'].includes(m.folder)
-   : categories.includes(nav)
-    ? m.category===nav && !['Trash','Spam'].includes(m.folder)
-    : m.folder===nav);
+  const inView=inFolder(m,nav);
   return inView&&(!projectFilter||m.project===projectFilter)&&(filter==='All mail'||(filter==='Unread'&&m.unread)||(filter==='Starred'&&m.star)||(filter==='Attachments'&&m.files.length>0)||(filter==='Incoming'&&m.folder==='Inbox'&&m.unread)||(filter==='Urgent'&&queues.urgent.some(item=>item.id===m.id)));
  }).sort((a,b)=>b.date.localeCompare(a.date)),[mail,nav,query,projectFilter,filter]);
+ const unreadCounts=Object.fromEntries(groups.flatMap(group=>group.links.map(([label])=>[
+  label,mail.filter(message=>message.unread&&inFolder(message,label)).length
+ ])));
  const currentRow=row&&list.some(m=>m.id===row.id)?row:undefined;
  const related=currentRow?threadFor(mail,currentRow) as Message[]:[];
  const newest=related.filter(m=>m.id!==currentRow?.id);
@@ -260,13 +302,30 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  async function change(ids:string[],patch:Partial<Message>) {
   if (liveToken) {
    const action=patch.folder?'move':patch.unread!==undefined?(patch.unread?'unread':'read'):(patch.star?'star':'unstar');
+   let succeeded=0;
+   const available=patch.folder?ids.filter(id=>!moving.current.has(id)):ids;
+   if (!available.length) return false;
+   if (patch.folder) available.forEach(id=>moving.current.add(id));
    try {
-    for (const id of ids) await liveRequest('update',{id,action,destination:patch.folder});
-    if (patch.folder) await refreshMailbox();
+    for (const id of available) {
+     await liveRequest('update',{id,action,destination:patch.folder});
+     succeeded++;
+     if (patch.folder) ++mailboxRevision.current;
+     setState(previous=>({...previous,mail:patch.folder?previous.mail.filter(item=>item.id!==id):
+      previous.mail.map(item=>item.id===id?rowActions(item,patch) as Message:item)}));
+    }
    } catch(error) {
     setToast(error instanceof Error?error.message:'Mailbox action failed.');
-    return false;
+   } finally {
+    if (patch.folder) {
+     available.forEach(id=>moving.current.delete(id));
+     if (succeeded) {
+      await refreshing.current;
+      void refreshMailbox();
+     }
+    }
    }
+   return succeeded===available.length;
   }
   setState(s=>({...s,mail:s.mail.map(m=>ids.includes(m.id)?rowActions(m,patch) as Message:m)}));
   return true;
@@ -279,7 +338,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   setToast(folder==='Archive'?'Conversation archived':folder==='Trash'?'Moved to Trash':'Moved to '+folder);
  }
  function start(mode='new',m?:Message){
-  if(liveToken&&!account)return;
+  if(compose||(liveToken&&!account))return;
   if (mode==='Forward' && m?.needsBody) {
    const result=bodies[m.id];
    if (!result || 'error' in result) {
@@ -298,7 +357,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   setDraggingFiles(false);
   setState(s=>({...s,drafts:[...s.drafts,d]}));setCompose(d.id);setMenu('');
  }
- function edit(patch:Partial<Draft>){setState(s=>({...s,drafts:s.drafts.map(d=>d.id===compose?{...d,...patch}:d)}))}
+ function edit(patch:Partial<Draft>, fromUpload=false){if (!fromUpload&&(writing.current||sendingRef.current)) return;setState(s=>({...s,drafts:s.drafts.map(d=>d.id===compose?{...d,...patch}:d)}))}
  async function performSave(task:()=>Promise<void>) {
   if (writing.current||sendingRef.current) return;
   writing.current=true;
@@ -309,7 +368,8 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  }
  function closeDraft() {
   if (!draft||writing.current||sendingRef.current) return;
-  if (!draft.to&&!draft.cc&&!draft.bcc&&!draft.subject&&!draft.body&&!draft.files.length&&!draft.attachments?.length&&!draft.stagedAttachments?.length&&!draft.forwardedAttachments?.length&&!draft.largeFiles?.length) {
+  if (!shouldSaveDraft) {
+   if (liveToken) clearDraftRecovery(draft);
    setState(previous=>({...previous,drafts:previous.drafts.filter(item=>item.id!==draft.id)}));
    setCompose(null);
    return;
@@ -321,13 +381,22 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     setState(previous=>({...previous,drafts:previous.drafts.filter(item=>item.id!==draft.id)}));
    }
    setCompose(null);
-   setToast(hosted?'Draft saved':liveToken?'Draft kept for this session':'Draft saved locally');
+   setToast(hosted?'Draft saved':liveToken?'Draft saved for this browser tab':'Draft saved locally');
   });
  }
  function reopenDraft(id:string) {
-  if (!hosted) {setCompose(id);return;}
+  if (compose) return;
+  if (state.drafts.some(item=>item.id===id)) {
+   reopenedDraft.current=id;
+   lastSaved.current='';
+   setDraftSaveState('');
+   setCompose(id);
+   return;
+  }
+  if (!hosted) return;
   void performSave(async()=>{
    const loaded:Draft=await liveRequest('draft&id='+encodeURIComponent(id));
+   reopenedDraft.current=id;
    lastSaved.current=JSON.stringify(loaded);
    setDraftSaveState('Draft saved');
    setState(previous=>({...previous,drafts:[loaded,...previous.drafts.filter(item=>item.id!==id)]}));
@@ -342,6 +411,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     await liveRequest('draft',{id,discard:true});
     setSavedDrafts(previous=>previous.filter(item=>item.id!==id));
    }
+   if (liveToken&&draft) clearDraftRecovery(draft);
    setState(previous=>({...previous,drafts:previous.drafts.filter(item=>item.id!==id)}));
    setCompose(null);
    setToast('Draft discarded');
@@ -412,7 +482,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
       complete.push(await uploadLargeFile(draft.id,file,liveRequest,percent=>{
        setUploadProgress('Uploading file '+(index+1)+' of '+files.length+' · '+percent+'%');
       },controller.signal));
-      edit({largeFiles:[...complete]});
+      edit({largeFiles:[...complete]},true);
      }
      setToast('Download links added');
     } finally {largeUploadAbort.current=null;setUploadProgress('');}
@@ -427,7 +497,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   void performSave(async()=>{
    if (!hosted) {
     const added=await Promise.all(files.map(async file=>({name:file.name,data:await encodeFile(file),size:file.size})));
-    edit({attachments:[...inline,...added]});
+    edit({attachments:[...inline,...added]},true);
     return;
    }
    const completed=[...staged];
@@ -448,7 +518,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
       }
      }
      completed.push(descriptor);
-     edit({stagedAttachments:[...completed]});
+     edit({stagedAttachments:[...completed]},true);
     }
     setToast('Files attached');
    } finally {setUploadProgress('');}
@@ -484,6 +554,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    }
   }
   const m:Message={id,thread:draft.thread||id,name:'A2Z Construction Services',company:'A2Z',subject:draft.subject,date:new Date().toISOString(),body,files:[...draft.files,...(draft.attachments||[]).map(file=>file.name),...(draft.stagedAttachments||[]).map(file=>file.name),...(draft.forwardedAttachments||[]).map(file=>file.name)],from:draft.identity,to:draft.to,cc:draft.cc,bcc:draft.bcc,category:classify(draft.subject,draft.body,draft.identity,state.rules),project:draft.parent?.project||matchProject(draft.subject+' '+draft.body),folder:'Sent',unread:false,star:false,headers:{messageId,references}};
+  if (liveToken) clearDraftRecovery(draft);
   if (!draftCleanupFailed) {
    ++prefsVersion.current;
    setSavedDrafts(previous=>previous.filter(item=>item.id!==draft.id));
@@ -515,13 +586,16 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  }document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key)});
  const tag=(m:Message)=><span className={'tag '+tones[m.category]}>{tags[m.category]}</span>;
  const project=projects.find(p=>p.id===currentRow?.project);
- function renderAttachments(message:Message) {
-  if (!message.attachments?.length) return null;
-  return <div className="attachments"><h3><Paperclip size={15}/> Attachments <span>{message.attachments.length}</span></h3>
-   <div>{message.attachments.map(file=><button type="button" key={file.part} onClick={()=>setLivePreview({id:message.id,file})}>
-    <span className="file-icon"><FileText size={19}/></span><span><b>{file.name}</b><small>Preview or download</small></span><Download size={16}/>
+ function renderAttachments(messages:Message[]) {
+  const cards=messages.flatMap(message=>liveToken
+   ? (message.attachments||[]).map(file=>({key:message.id+':'+file.part,name:file.name,message,open:()=>setLivePreview({id:message.id,file})}))
+   : message.files.map((name,index)=>({key:message.id+':'+index,name,message,open:()=>setPreview(name)})));
+  if (!cards.length) return null;
+  return <section className="attachments thread-attachments"><h3><Paperclip size={15}/> Attachments <span>{cards.length}</span></h3>
+   <div>{cards.map(({key,name,message,open})=><button type="button" key={key} onClick={open}>
+    <span className="file-icon"><FileText size={19}/></span><span><b>{name}</b><small>{message.name} · {time(message.date)}</small></span><Download size={16}/>
    </button>)}</div>
-  </div>;
+  </section>;
  }
  async function pickSignatureImage(identity:string,event:React.ChangeEvent<HTMLInputElement>) {
   const file=event.currentTarget.files?.[0];
@@ -562,12 +636,17 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <aside className="sidebar">
  <div className="brand"><div className="mark">A<span>2</span>Z</div><div><strong>A2Z Construction</strong><small>OPERATIONS MAIL</small></div></div>
  <button className="compose" disabled={!!liveToken&&!account} onClick={()=>start()}><Plus size={19}/> Compose <kbd>C</kbd></button>
- <div className="nav">{groups.map(g=><section key={g.label}><h2>{g.label}</h2>{g.links.map(([label,Icon])=><button key={label} className={nav===label&&!query?'active':''} onClick={()=>go(label)}><Icon size={16}/><span>{label}</span>{label==='Inbox'&&unread>0&&<b>{unread}</b>}{label==='Drafts'&&draftList.length>0&&<b>{draftList.length}</b>}</button>)}</section>)}</div>
+ <div className="nav">{groups.map(g=><section key={g.label}><h2>{g.label}</h2>{g.links.map(([label,Icon])=><button key={label} className={nav===label&&!query?'active':''} onClick={()=>go(label)}><Icon size={16}/><span>{label}</span>{label!=='Drafts'&&label!=='Command Center'&&label!=='Trash'&&label!=='Spam'&&unreadCounts[label]>0&&<b>{unreadCounts[label]}</b>}{label==='Drafts'&&draftList.length>0&&<b>{draftList.length}</b>}</button>)}</section>)}
+ {mailFolders.length>0&&<section><h2>FOLDERS</h2>{mailFolders.map(folder=>{
+  const key=customFolderPrefix+folder;
+  const count=mail.filter(message=>message.folder===folder&&message.unread).length;
+  return <button key={key} className={nav===key&&!query?'active':''} onClick={()=>go(key)}><FolderKanban size={16}/><span>{folder}</span>{count>0&&<b>{count}</b>}</button>;
+ })}</section>}</div>
  <div className="sidebar-end"><div className="env"><i/> {liveToken ? connection : 'Sandbox workspace'}</div><div className="profile"><div className="profile-avatar">OP</div><div><b>Operations</b><small>A2Z Construction</small></div><button title="Keyboard shortcuts" onClick={()=>setHelp(true)}><MoreHorizontal size={17}/></button></div></div>
  </aside>
  <main>
- <header className="topbar"><button className="icon nav-toggle" aria-label="Toggle navigation" onClick={()=>setSide(!side)}><Menu size={20}/></button><div className="crumb"><PanelLeft size={16}/> <span>Workspace</span><span className="slash">/</span><b>{query?'Search':nav}</b></div><div className="search"><Search size={17}/><input id="search" placeholder="Search mail, projects, attachments…" value={query} onChange={e=>{setQuery(e.target.value);setMobileRead(false);setLimit(60)}}/>{query?<button className="icon" title="Clear search" onClick={()=>setQuery('')}><X size={14}/></button>:<kbd>/</kbd>}</div><button className="theme-toggle" aria-label={theme==='dark'?'Switch to color mode':'Switch to dark mode'} onClick={()=>setTheme(theme==='dark'?'color':'dark')}>{theme==='dark'?<Moon size={15}/>:<Palette size={15}/>}<span>{theme==='dark'?'Dark mode':'Color mode'}</span></button><button className="demo-pill" onClick={()=>setMenu(menu==='sandbox'?'':'sandbox')}><i/> {liveToken?'IONOS':'Sandbox'} <ChevronDown size={12}/></button>
- {menu==='sandbox'&&<div className="popover sandbox-menu"><b>{liveToken?'IONOS Mail':'Sandbox mode'}</b><p>{liveToken?(account||connection):'Changes stay in this browser.'}</p>{liveToken?<button onClick={()=>void refreshMailbox()}>Refresh mailbox <kbd>⌘⇧R</kbd></button>:<button onClick={receive}><Inbox size={15}/> Simulate incoming mail</button>}<button disabled={!senderIdentities.length} onClick={openSignatures}><Settings2 size={15}/> Email signatures</button><button onClick={()=>{setHelp(true);setMenu('')}}>Keyboard shortcuts</button>{onSignOut&&<button onClick={()=>onSignOut()}>Sign out</button>}</div>}</header>
+ <header className="topbar"><button className="icon nav-toggle" aria-label="Toggle navigation" onClick={()=>setSide(!side)}><Menu size={20}/></button><div className="crumb"><PanelLeft size={16}/> <span>Workspace</span><span className="slash">/</span><b>{query?'Search':viewName}</b></div><div className="search"><Search size={17}/><input id="search" placeholder="Search mail, projects, attachments…" value={query} onChange={e=>{setQuery(e.target.value);setMobileRead(false);setLimit(60)}}/>{query?<button className="icon" title="Clear search" onClick={()=>setQuery('')}><X size={14}/></button>:<kbd>/</kbd>}</div><button className="theme-toggle" aria-label={theme==='dark'?'Switch to color mode':'Switch to dark mode'} onClick={()=>setTheme(theme==='dark'?'color':'dark')}>{theme==='dark'?<Moon size={15}/>:<Palette size={15}/>}<span>{theme==='dark'?'Dark mode':'Color mode'}</span></button><button className="demo-pill" onClick={()=>setMenu(menu==='sandbox'?'':'sandbox')}><i/> {liveToken?'IONOS':'Sandbox'} <ChevronDown size={12}/></button>
+ {menu==='sandbox'&&<div className="popover sandbox-menu"><b>{liveToken?'IONOS Mail':'Sandbox mode'}</b><p>{liveToken?(account||connection):'Changes stay in this browser.'}</p>{liveToken?<button onClick={()=>void refreshMailbox()}>Refresh mailbox <kbd>⌘⇧R</kbd></button>:<button onClick={receive}><Inbox size={15}/> Simulate incoming mail</button>}<button disabled={!senderIdentities.length} onClick={openSignatures}><Settings2 size={15}/> Email signatures</button><button onClick={()=>{setHelp(true);setMenu('')}}>Keyboard shortcuts</button>{onSignOut&&<button onClick={()=>void onSignOut().catch(error=>setToast(error.message))}>Sign out</button>}</div>}</header>
  {nav==='Command Center'&&!query?<div className="dashboard">
  <h1>Command Center</h1>
  <div className="metrics">{([
@@ -590,26 +669,27 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <section className="activity"><h2>Recent activity</h2>{[...mail].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,6).map(m=><button key={m.id} onClick={()=>{go('Inbox');open(m)}}>{tag(m)}<b>{m.subject}</b><span>{m.name}</span><ArrowRight size={16}/></button>)}</section></div>:
  <div className="workspace">
  <section className="message-list">
- <div className="list-head"><div className="eyebrow">{query?'GLOBAL SEARCH':'OPERATIONS MAIL'}</div><h1>{query?'Search results':nav}</h1><p>{nav==='Inbox'&&!query?'All messages across folders and categories.':nav==='Drafts'&&!query?'Pick up where you left off.':query?'Search across all mail folders.':nav==='Invoices'?'Invoices, payments, receipts, and purchase orders.':'Manage your construction correspondence.'}</p>
+ <div className="list-head"><div className="eyebrow">{query?'GLOBAL SEARCH':'OPERATIONS MAIL'}</div><h1>{query?'Search results':viewName}</h1><p>{nav==='Inbox'&&!query?'Incoming messages, newest first.':nav==='Drafts'&&!query?'Pick up where you left off.':query?'Search across all mail folders.':nav==='Invoices'?'Invoices, payments, receipts, and purchase orders.':'Manage your construction correspondence.'}</p>
  {nav==='Active Projects'&&!query&&<select aria-label="Filter by project" value={projectFilter} onChange={e=>setProjectFilter(e.target.value)}><option value="">All projects</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>}</div>
- <div className="list-toolbar">{marked.length?<><button onClick={()=>setMarked([])}>{marked.length} selected ×</button><button title="Archive selected" className="icon" onClick={()=>move(marked,'Archive')}><Archive size={16}/></button><button title="Delete selected" className="icon" onClick={()=>move(marked,'Trash')}><Trash2 size={16}/></button></>:<><div className="tabs">{['All mail','Unread'].map(f=><button key={f} className={filter===f?'on':''} onClick={()=>{setFilter(f);setLimit(60)}} disabled={!!query}>{f}{f==='Unread'&&nav==='Inbox'&&<span>{unread}</span>}</button>)}</div><button className={'icon '+(!['All mail','Unread'].includes(filter)?'accent':'')} title="Filter messages" onClick={()=>setMenu(menu==='filters'?'':'filters')}><SlidersHorizontal size={17}/></button></>}
+ <div className="list-toolbar">{marked.length?<><button onClick={()=>setMarked([])}>{marked.length} selected ×</button><button title="Archive selected" className="icon" onClick={()=>move(marked,'Archive')}><Archive size={16}/></button><button title="Delete selected" className="icon" onClick={()=>move(marked,'Trash')}><Trash2 size={16}/></button></>:<><div className="tabs">{['All mail','Unread'].map(f=><button key={f} className={filter===f?'on':''} onClick={()=>{setFilter(f);setLimit(60)}} disabled={!!query}>{f}{f==='Unread'&&nav==='Inbox'&&<span>{unreadIncoming}</span>}</button>)}</div><button className={'icon '+(!['All mail','Unread'].includes(filter)?'accent':'')} title="Filter messages" onClick={()=>setMenu(menu==='filters'?'':'filters')}><SlidersHorizontal size={17}/></button></>}
  {menu==='filters'&&<div className="popover filters">{['All mail','Unread','Starred','Attachments','Incoming','Urgent'].map(f=><button key={f} onClick={()=>{setFilter(f);setMenu('')}}>{f}{filter===f&&<Check size={14}/>}</button>)}</div>}</div>
  <div className="rows">
  {nav==='Drafts'&&!query?draftList.length?draftList.map(d=><button className="draft-row" key={d.id} disabled={saving} onClick={()=>reopenDraft(d.id)}><span className="tag rose">Draft</span><b>{d.subject||'(No subject)'}</b><span>{d.to||'No recipient'}</span></button>):<div className="empty">{draftSyncError||'No drafts yet.'}{draftSyncError&&<button className="project-tag" onClick={()=>void syncPreferences()}>Retry</button>}</div>:list.length?list.slice(0,limit).map((m,i)=><div key={m.id} className={'mail-row '+(m.id===currentRow?.id?'selected ':'')+(m.unread?'unread':'')}>
  <div className="row-side"><input type="checkbox" disabled={!!liveToken} aria-label={'Select '+m.subject} checked={marked.includes(m.id)} onChange={e=>setMarked(e.target.checked?[...marked,m.id]:marked.filter(x=>x!==m.id))}/><button className={'star '+(m.star?'starred':'')} disabled={!!liveToken&&m.id.startsWith('out-')} title={m.star?'Remove star':'Star message'} onClick={()=>change([m.id],{star:!m.star})}><Star size={14}/></button></div>
- <button className="row-content" onClick={()=>open(m)}><div className="row-top"><span className={'avatar mini '+avatarColors[i%5]}>{initials(m.name)}</span><b>{m.folder==='Sent'?'To: '+m.to:m.name}</b><time>{time(m.date)}</time></div><strong>{m.subject}</strong><p>{m.body.replace(/\s+/g,' ')}</p><div className="row-foot">{tag(m)}{m.folder!=='Inbox'&&<span className="tag gray">{m.folder}</span>}{m.files.length>0&&<span className="paper-count"><Paperclip size={13}/>{m.files.length}</span>}{m.unread&&<i className="unread-dot"/>}</div></button></div>):<div className="empty">No messages match this view.</div>}
+ <button className="row-content" onClick={()=>open(m)}><div className="row-top"><span className={'avatar mini '+avatarColors[i%5]}>{initials(m.name)}</span><b>{m.folder==='Sent'?'To: '+m.to:m.name}</b><time>{time(m.date)}</time></div><strong>{m.subject}</strong><p>{m.body.replace(/\s+/g,' ')}</p><div className="row-foot">{tag(m)}{m.folder!=='Inbox'&&<span className="tag gray">{m.folder}</span>}{m.files.length>0&&<span className="paper-count"><Paperclip size={13}/>{m.files.length}</span>}{m.unread&&<i className="unread-dot"/>}</div></button>
+ {m.folder!=='Trash'&&(!liveToken||!m.id.startsWith('out-'))&&<button type="button" className="icon row-delete" title="Move to Trash" aria-label={'Move to Trash: '+m.subject} onClick={()=>void move([m.id],'Trash')}><Trash2 size={16}/></button>}
+ </div>):<div className="empty">No messages match this view.</div>}
  {list.length>limit&&<button className="load" onClick={()=>setLimit(limit+60)}>Load more messages</button>}</div>
  <footer className="list-footer">{nav==='Drafts'&&!query?draftList.length+' drafts':list.length+' messages'} <span>•</span> {liveToken?connection:'Local sandbox'}</footer>
  </section>
  <section className="reader">{currentRow?<><div className="reader-tools"><button className="icon back" title="Back to messages" onClick={()=>setMobileRead(false)}><ChevronLeft size={19}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Archive" onClick={()=>move([currentRow.id],'Archive')}><Archive size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Trash" onClick={()=>move([currentRow.id],'Trash')}><Trash2 size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.unread?'Mark read':'Mark unread'} onClick={()=>change([currentRow.id],{unread:!currentRow.unread})}>{currentRow.unread?<MailOpen size={18}/>:<Mail size={18}/>}</button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Move message" onClick={()=>setMenu(menu==='move'?'':'move')}><MoreHorizontal size={20}/></button>{currentRow.folder!=='Inbox'&&currentRow.folder!=='Sent'&&<button className="icon" title="Restore message" onClick={()=>move([currentRow.id],currentRow.previousFolder==='Sent'?'Sent':'Inbox')}><RotateCcw size={17}/></button>}{menu==='move'&&<div className="popover move">{['Inbox','Archive','Trash','Spam'].map(f=><button key={f} onClick={()=>move([currentRow.id],f)}>Move to {f}</button>)}</div>}<span className="tool-space"/><span className="position">{list.findIndex(m=>m.id===currentRow.id)+1} of {list.length}</span><button className="icon next" title="Previous message" disabled={list[0]===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)-1];if(p)open(p)}}><ChevronLeft size={18}/></button><button className="icon next next-right" title="Next message" disabled={list.at(-1)===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)+1];if(p)open(p)}}><ChevronLeft size={18}/></button></div>
  <div className="reader-scroll"><div className="reader-content"><div className="subject-line"><h2>{currentRow.subject}</h2><button className={'star '+(currentRow.star?'starred':'')} disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Toggle message star" onClick={()=>change([currentRow.id],{star:!currentRow.star})}><Star size={20}/></button></div><div className="reader-tags">{tag(currentRow)}{project&&<button className="project-tag" onClick={()=>{go('Active Projects');setProjectFilter(project.id)}}><FolderKanban size={13}/>{project.name}</button>}</div>
  <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}{currentRow.folder==='Sent'&&currentRow.bcc&&' · Bcc: '+currentRow.bcc}</small></div><time>{time(currentRow.date)}</time></div>
+ {renderAttachments([currentRow,...newest.slice().reverse()])}
  {currentRow.due&&<div className="deadline"><div className="deadline-icon"><Clock3 size={19}/></div><div><b>Bid submission deadline</b><span>{day(currentRow.due+'T12:00:00')}</span></div><span className="tag gold">Open bid</span></div>}
  {renderBody(currentRow)}
- {liveToken&&renderAttachments(currentRow)}
- {!liveToken&&currentRow.files.length>0&&<div className="attachments"><h3><Paperclip size={15}/> Attachments <span>{currentRow.files.length}</span></h3><div>{currentRow.files.map((f,i)=><button key={i} onClick={()=>setPreview(f)}><span className="file-icon"><FileText size={19}/></span><span><b>{f}</b><small>Sandbox attachment</small></span><Download size={16}/></button>)}</div></div>}
  <div className="reply-actions desktop-replies">{replyButtons(currentRow)}</div>
- {newest.length>0&&<section className="thread"><h3>Conversation · {related.length} messages</h3>{newest.map(m=><details key={m.id} onToggle={e=>{if(e.currentTarget.open&&m.needsBody&&!bodies[m.id])void loadBody(m).catch(()=>{})}}><summary>{m.name} · {time(m.date)}</summary>{renderBody(m)}{liveToken&&renderAttachments(m)}{!liveToken&&m.files.map(f=><button key={f} onClick={()=>setPreview(f)}>{f}</button>)}</details>)}</section>}
+ {newest.length>0&&<section className="thread"><h3>Conversation · {related.length} messages</h3>{newest.map(m=><details key={m.id} onToggle={e=>{if(e.currentTarget.open&&m.needsBody&&!bodies[m.id])void loadBody(m).catch(()=>{})}}><summary>{m.name} · {time(m.date)}</summary>{renderBody(m)}</details>)}</section>}
  <div className="metadata" hidden={!!liveToken}><label>Project<select value={currentRow.project} onChange={e=>{change([currentRow.id],{project:e.target.value});setToast('Project assignment saved')}}><option value="">Unassigned</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><label>Category<select value={currentRow.category} onChange={e=>{change([currentRow.id],{category:e.target.value});setToast('Category corrected')}}>{categories.map(c=><option key={c}>{c}</option>)}</select></label><button onClick={()=>{const domain=currentRow.from.split('@')[1];setState(s=>({...s,rules:{...s.rules,[domain]:currentRow.category}}));setToast('Rule saved for future messages from '+domain)}}>Remember sender domain rule</button></div>
  </div></div><nav className="mobile-dock mobile-replies" aria-label="Message actions">{replyButtons(currentRow)}</nav></>:<div className="reader-empty"><Inbox size={29}/><h2>Select a message</h2><p>Open a conversation to read it here.</p></div>}</section>
  </div>}
@@ -661,12 +741,41 @@ function HostedInbox({ready,highLevelOrigins,highLevelIssues,largeUploads,contac
  const [token,setToken]=useState('');
  const canAutoSignIn=ready&&window.parent!==window&&highLevelOrigins.length>0;
  const [attempt,setAttempt]=useState(canAutoSignIn?1:0);
+ const canRestore=ready&&window.parent===window;
+ const [restoring,setRestoring]=useState(canRestore);
  const [checking,setChecking]=useState(canAutoSignIn);
+ const [signingOut,setSigningOut]=useState(false);
  const [notice,setNotice]=useState(()=>{
   if (window.parent===window||!ready||highLevelOrigins.length) return '';
   const detail=highLevelIssues.join('. ');
   return 'HighLevel auto sign-in is disabled on this deployment.'+(detail?' '+detail+'.':'');
  });
+
+ useEffect(()=>{
+  if (!canRestore) return;
+  const controller=new AbortController();
+  void hostedRequest('session',undefined,rememberedSession,controller.signal)
+   .then(()=>{if(!controller.signal.aborted)setToken(rememberedSession)})
+   .catch(()=>{})
+   .finally(()=>{if(!controller.signal.aborted)setRestoring(false)});
+  return ()=>controller.abort();
+ },[canRestore]);
+
+ async function signOut(error?:unknown) {
+  if (signingOut) return;
+  if (token===rememberedSession) {
+   setSigningOut(true);
+   try { await hostedRequest('logout',{},token); }
+   catch {
+    setSigningOut(false);
+    throw new Error('Could not sign out. Check your connection and try again.');
+   }
+   setSigningOut(false);
+  }
+  setNotice(error?highLevelSignInNotice(error):'');
+  setToken('');
+  setAttempt(0);
+ }
 
  useEffect(()=>{
   if (!attempt) return;
@@ -679,7 +788,8 @@ function HostedInbox({ready,highLevelOrigins,highLevelIssues,largeUploads,contac
   return ()=>controller.abort();
  },[attempt,highLevelOrigins]);
 
- if (token) return <App liveToken={token} largeUploads={largeUploads} contactLookup={contactLookup} onSignOut={error=>{setNotice(error?highLevelSignInNotice(error):'');setToken('');setAttempt(0)}}/>;
+ if (token) return <App liveToken={token} largeUploads={largeUploads} contactLookup={contactLookup} onSignOut={signOut}/>;
+ if (restoring) return <div className="login-page" role="status">Checking your saved sign-in…</div>;
  if (checking) return <div className="login-page" role="status">
   <div className="signature-settings signature-fields"><h1>Signing in through HighLevel…</h1>
   <button className="project-tag" onClick={()=>{setAttempt(0);setChecking(false)}}>Use mailbox password instead</button></div>

@@ -105,9 +105,9 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
   Imap:FakeImap,
   mailboxFactory:config=>({mail:async()=>({email:config.email,mail:[],contacts:[]})}),
  });
- const call=(action,{body,token,origin}={})=>handler(new Request('https://test.example/.netlify/functions/ionos?action='+action,{
+ const call=(action,{body,token,origin,cookie}={})=>handler(new Request('https://test.example/.netlify/functions/ionos?action='+action,{
   method:body?'POST':'GET',
-  headers:{...(body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{}),...(origin?{Origin:origin}:{})},
+  headers:{...(body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:token==='MailboxCookie'?token:'Bearer '+token}:{}),...(origin?{Origin:origin}:{}),...(cookie?{Cookie:cookie}:{})},
   body:body?JSON.stringify(body):undefined,
  }));
  assert.equal((await call('mail')).status,401);
@@ -122,6 +122,53 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
  const response=await call('mail',{token});
  assert.equal(response.headers.get('cache-control'),'no-store');
  assert.equal((await response.json()).email,env.IONOS_EMAIL);
+ const saved=await call('login',{body:{email:env.IONOS_EMAIL,password:env.IONOS_PASSWORD,remember:true}});
+ const remembered=(await saved.json()).token;
+ assert.equal(remembered,'MailboxCookie');
+ const cookieHeader=saved.headers.get('set-cookie');
+ assert.match(cookieHeader,/Max-Age=604800; Path=\/; Secure; HttpOnly; SameSite=Strict/);
+ const cookie=cookieHeader.split(';')[0];
+ assert.equal((await call('session',{cookie,token:remembered})).status,200);
+ assert.equal((await call('mail',{cookie,token:remembered})).status,200);
+ assert.equal((await call('mail',{cookie})).status,401);
+ assert.equal((await call('logout',{cookie,token:remembered,body:{},origin:'https://other.example'})).status,403);
+ const logout=await call('logout',{cookie,token:remembered,body:{}});
+ assert.match(logout.headers.get('set-cookie'),/^__Host-a2z-mail=; Max-Age=0;/);
+ assert.equal((await call('session',{token:remembered})).status,401);
+});
+
+test('moving incoming mail uses the Trash folder and ignores deleted IMAP entries', async () => {
+ let moved=false;
+ const inbox={path:'INBOX',flags:new Set()};
+ const trash={path:'Deleted Items',specialUse:'\\Trash',flags:new Set()};
+ class FakeImap {
+  async connect() {}
+  async list() {return [trash,inbox,{path:'Completed Jobs',flags:new Set()}];}
+  async getMailboxLock(path) {
+   this.path=path;
+   this.mailbox={exists:path==='Completed Jobs'?0:1,uidValidity:22n};
+   return {release(){}};
+  }
+  async fetchAll(_range,fields) {
+   if (fields.source||(this.path===trash.path&&!moved)) return [];
+   return [{uid:4,flags:new Set(this.path===inbox.path&&moved?['\\Deleted']:[]),size:40,
+    envelope:{subject:'Invoice for Harbor Point'}}];
+  }
+  async messageMove(uid,destination,options) {
+   assert.equal(uid,'4');
+   assert.equal(destination,trash.path);
+   assert.deepEqual(options,{uid:true});
+   moved=true;
+   return {destination};
+  }
+  close() {}
+ }
+ const mailbox=createIonosMailbox(ionosConfig(env),{Imap:FakeImap});
+ const before=await mailbox.mail();
+ assert.deepEqual(before.folders,['Inbox','Trash','Completed Jobs']);
+ assert.equal(before.mail[0].project,'P-241');
+ assert.deepEqual(await mailbox.update({id:'INBOX:22:4',action:'move',destination:'Trash'}),{ok:true});
+ assert.deepEqual((await mailbox.mail()).mail.map(message=>message.folder),['Trash']);
 });
 
 test('opening a large IONOS email fetches only its readable MIME body', async () => {

@@ -10,13 +10,18 @@ import { createIonosMailbox, ionosConfig } from '../../server/ionos.mjs';
 
 const mailboxSignInError = 'Could not sign in. Use your full IONOS mailbox address and mailbox password. A2Z must also enable the mailbox for direct sign-in.';
 const lifetime = 2 * 60 * 60 * 1000;
+const rememberedSeconds = 7 * 24 * 60 * 60;
+const rememberedCookie = '__Host-a2z-mail';
+const cookieAuthorization = 'MailboxCookie';
+const sessionCookie = (value, age) =>
+ `${rememberedCookie}=${value}; Max-Age=${age}; Path=/; Secure; HttpOnly; SameSite=Strict`;
 const headers = {'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
-const reply = (body,status=200) => Response.json(body,{status,headers});
+const reply = (body,status=200,cookie) => Response.json(body,{status,headers:cookie?{...headers,'Set-Cookie':cookie}:headers});
 
-function encrypt(key, login) {
+function encrypt(key, login, duration=lifetime) {
  const iv = randomBytes(12);
  const cipher = createCipheriv('aes-256-gcm',key,iv);
- const encrypted = Buffer.concat([cipher.update(JSON.stringify({...login,expires:Date.now()+lifetime}),'utf8'),cipher.final()]);
+ const encrypted = Buffer.concat([cipher.update(JSON.stringify({...login,expires:Date.now()+duration}),'utf8'),cipher.final()]);
  return Buffer.concat([iv,cipher.getAuthTag(),encrypted]).toString('base64url');
 }
 
@@ -81,7 +86,11 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     client.on('error',()=>{});
     try { await client.connect(); }
     finally { client.close(); }
-    return reply({token:encrypt(key,{email,password}),email});
+    if (input.remember===true) {
+     const token=encrypt(key,{email,password},rememberedSeconds*1000);
+     if (token.length<=3800) return reply({token:cookieAuthorization,email},200,sessionCookie(token,rememberedSeconds));
+    }
+    return reply({token:encrypt(key,{email,password}),email},200,sessionCookie('',0));
    }
    if (action==='ghl-login' && request.method==='POST') {
     const input=await readInput(request,26000);
@@ -92,12 +101,19 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     },401);
     return reply({token:encrypt(key,{highLevel:result.identity}),email:result.identity.email});
    }
-   session = decrypt(key,request.headers.get('authorization'));
+   const authorization=request.headers.get('authorization');
+   const usesCookie=authorization===cookieAuthorization;
+   if (usesCookie && action==='logout' && request.method==='POST') {
+    return reply({ok:true},200,sessionCookie('',0));
+   }
+   const cookie=usesCookie && request.headers.get('cookie')?.match(/(?:^|;\s*)__Host-a2z-mail=([A-Za-z0-9_-]+)(?=;|$)/)?.[1];
+   session=decrypt(key,usesCookie?(cookie?'Bearer '+cookie:null):authorization);
    const login = session?.highLevel ? highLevel?.getCredentials(session.highLevel) : session;
    if (!login || !allowed.has(login.email)) return reply({
     error:'Sign in to your IONOS mailbox again.',
     reason:session?.highLevel?'ghl_mailbox':'session_expired',
-   },401);
+   },401,usesCookie?sessionCookie('',0):undefined);
+   if (usesCookie && action==='session' && request.method==='GET') return reply({email:login.email});
    if (action==='contacts' && request.method==='POST') {
     if (!contacts || (session?.highLevel && session.highLevel.activeLocation!==contacts.locationId)) return reply({contacts:[]});
     const input=await readInput(request,2048);
