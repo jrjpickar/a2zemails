@@ -36,7 +36,7 @@ export function mailboxPreferences(email, store=getStore({name:'mail-preferences
    const blobKey=fileKey(input?.id);
    const draft={
     id:input.id,identity:email,files:[],attachments:mailAttachments(input.attachments),stagedAttachments:stagedFiles(input.stagedAttachments),forwardedAttachments:forwardedReferences(input.forwardedAttachments),largeFiles:largeFileRefs(input.largeFiles),
-    to:requiredText(input.to,2048),cc:requiredText(input.cc,2048),
+    to:requiredText(input.to,2048),cc:requiredText(input.cc,2048),bcc:requiredText(input.bcc??'',2048),
     subject:requiredText(input.subject,500),body:requiredText(input.body,150000),
     includeSignature:input.includeSignature!==false,
     updatedAt:new Date().toISOString(),

@@ -12,11 +12,11 @@ import {RecipientInput,type Contact} from './recipient-input';
 import {hostedEndpoint,hostedRequest,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
 import './style.css';
 import './theme.css';
-type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
+type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
 type Upload={name:string;data:string;size?:number};
 type StagedUpload={id:string;name:string;size:number};
 type SavedDraft={id:string;to:string;subject:string;updatedAt:string};
-type Draft={id:string;to:string;cc:string;subject:string;body:string;files:string[];thread?:string;parent?:Pick<Message,'project'|'headers'>;identity:string;includeSignature?:boolean;attachments?:Upload[];stagedAttachments?:StagedUpload[];forwardedAttachments?:ForwardedAttachment[];largeFiles?:LargeFile[]};
+type Draft={id:string;to:string;cc:string;bcc?:string;subject:string;body:string;files:string[];thread?:string;parent?:Pick<Message,'project'|'headers'>;identity:string;includeSignature?:boolean;attachments?:Upload[];stagedAttachments?:StagedUpload[];forwardedAttachments?:ForwardedAttachment[];largeFiles?:LargeFile[]};
 type State={mail:Message[];rules:Record<string,string>;drafts:Draft[];signatures?:Record<string,string>;signatureImages?:Record<string,string>};
 const samples=seed as Message[];
 const demo='operations@a2z.example';
@@ -65,8 +65,12 @@ const day=(v:string)=>new Date(v).toLocaleDateString('en-US',{month:'short',day:
 const time=(v:string)=>v.slice(0,10)==='2026-11-17'?new Date(v).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}):new Date(v).toLocaleDateString('en-US',{month:'short',day:'numeric'});
 const initials=(name:string)=>name.split(' ').slice(0,2).map(s=>s[0]).join('');
 const avatarColors=['sand','lavender','sage','peach','sky'];
-function App({liveToken,onSignOut,largeUploads=false}:{liveToken?:string;onSignOut?:(error?:unknown)=>void;largeUploads?:boolean}){
+function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveToken?:string;onSignOut?:(error?:unknown)=>void;largeUploads?:boolean;contactLookup?:boolean}){
  const [knownContacts,setKnownContacts]=useState<Contact[]>([]);
+ const lookupContacts=React.useCallback(async(query:string,signal:AbortSignal):Promise<Contact[]>=>{
+  const result=await hostedRequest('contacts',{query},liveToken,signal);
+  return result.contacts||[];
+ },[liveToken]);
  async function liveRequest(path:string, body?:object) {
   if (!onSignOut) return localRequest(path,body);
   try { return await hostedRequest(path,body,liveToken); }
@@ -150,7 +154,7 @@ function App({liveToken,onSignOut,largeUploads=false}:{liveToken?:string;onSignO
  const draft=state.drafts.find(d=>d.id===compose);
  const composeWindow=useComposePosition(draft?.id);
  const draftPayload=draft?JSON.stringify(draft):'';
- const hasDraftContent=Boolean(draft&&(draft.to||draft.cc||draft.subject||draft.body||draft.files.length||
+ const hasDraftContent=Boolean(draft&&(draft.to||draft.cc||draft.bcc||draft.subject||draft.body||draft.files.length||
   draft.attachments?.length||draft.stagedAttachments?.length||draft.forwardedAttachments?.length||draft.largeFiles?.length));
 
  async function persistDraft(current:Draft) {
@@ -305,7 +309,7 @@ function App({liveToken,onSignOut,largeUploads=false}:{liveToken?:string;onSignO
  }
  function closeDraft() {
   if (!draft||writing.current||sendingRef.current) return;
-  if (!draft.to&&!draft.cc&&!draft.subject&&!draft.body&&!draft.files.length&&!draft.attachments?.length&&!draft.stagedAttachments?.length&&!draft.forwardedAttachments?.length&&!draft.largeFiles?.length) {
+  if (!draft.to&&!draft.cc&&!draft.bcc&&!draft.subject&&!draft.body&&!draft.files.length&&!draft.attachments?.length&&!draft.stagedAttachments?.length&&!draft.forwardedAttachments?.length&&!draft.largeFiles?.length) {
    setState(previous=>({...previous,drafts:previous.drafts.filter(item=>item.id!==draft.id)}));
    setCompose(null);
    return;
@@ -452,7 +456,8 @@ function App({liveToken,onSignOut,largeUploads=false}:{liveToken?:string;onSignO
  }
  async function sendDraft(e:React.FormEvent){
   e.preventDefault();if(!draft||sendingRef.current||writing.current)return;
-  if(!draft.to.split(/[,;]/).some(s=>s.trim())||[draft.to,draft.cc].flatMap(s=>s.split(/[,;]/)).map(s=>s.trim()).filter(Boolean).some(s=>!/^\S+@[^@\s]+\.[^@\s]+$/.test(s))||!draft.subject.trim()||(!draft.body.trim()&&!draft.largeFiles?.length)){setToast('Enter valid recipients, a subject, and a message.');return}
+  const recipients=[draft.to,draft.cc,draft.bcc||''].flatMap(value=>value.split(/[,;]/)).map(value=>value.trim()).filter(Boolean);
+  if(!recipients.length||recipients.length>50||recipients.some(s=>!/^\S+@[^@\s]+\.[^@\s]+$/.test(s))||!draft.subject.trim()||(!draft.body.trim()&&!draft.largeFiles?.length)){setToast('Enter valid recipients, a subject, and a message.');return}
   const id='out-'+draft.id;
   const body=appendSignature(draft.body,draftSignature(draft));
   const references=draft.parent?[...draft.parent.headers.references,draft.parent.headers.messageId].filter(Boolean):[];
@@ -465,7 +470,7 @@ function App({liveToken,onSignOut,largeUploads=false}:{liveToken?:string;onSignO
    setSending(true);
    try {
     await autoSave.current;
-    const result=await liveRequest('send',{to:draft.to,cc:draft.cc,subject:draft.subject,body,references,id,attachments:draft.attachments,stagedAttachments:draft.stagedAttachments,forwardedAttachments:draft.forwardedAttachments,largeFiles:draft.largeFiles,signatureImage:draft.includeSignature===false?undefined:state.signatureImages?.[draft.identity],savedDraft:hosted});
+    const result=await liveRequest('send',{to:draft.to,cc:draft.cc,bcc:draft.bcc,subject:draft.subject,body,references,id,attachments:draft.attachments,stagedAttachments:draft.stagedAttachments,forwardedAttachments:draft.forwardedAttachments,largeFiles:draft.largeFiles,signatureImage:draft.includeSignature===false?undefined:state.signatureImages?.[draft.identity],savedDraft:hosted});
     messageId=result.messageId;
     rejected=result.rejected;
     sentSaved=result.sentSaved;
@@ -478,7 +483,7 @@ function App({liveToken,onSignOut,largeUploads=false}:{liveToken?:string;onSignO
     setSending(false);
    }
   }
-  const m:Message={id,thread:draft.thread||id,name:'A2Z Construction Services',company:'A2Z',subject:draft.subject,date:new Date().toISOString(),body,files:[...draft.files,...(draft.attachments||[]).map(file=>file.name),...(draft.stagedAttachments||[]).map(file=>file.name),...(draft.forwardedAttachments||[]).map(file=>file.name)],from:draft.identity,to:draft.to,cc:draft.cc,category:classify(draft.subject,draft.body,draft.identity,state.rules),project:draft.parent?.project||matchProject(draft.subject+' '+draft.body),folder:'Sent',unread:false,star:false,headers:{messageId,references}};
+  const m:Message={id,thread:draft.thread||id,name:'A2Z Construction Services',company:'A2Z',subject:draft.subject,date:new Date().toISOString(),body,files:[...draft.files,...(draft.attachments||[]).map(file=>file.name),...(draft.stagedAttachments||[]).map(file=>file.name),...(draft.forwardedAttachments||[]).map(file=>file.name)],from:draft.identity,to:draft.to,cc:draft.cc,bcc:draft.bcc,category:classify(draft.subject,draft.body,draft.identity,state.rules),project:draft.parent?.project||matchProject(draft.subject+' '+draft.body),folder:'Sent',unread:false,star:false,headers:{messageId,references}};
   if (!draftCleanupFailed) {
    ++prefsVersion.current;
    setSavedDrafts(previous=>previous.filter(item=>item.id!==draft.id));
@@ -598,7 +603,7 @@ function App({liveToken,onSignOut,largeUploads=false}:{liveToken?:string;onSignO
  </section>
  <section className="reader">{currentRow?<><div className="reader-tools"><button className="icon back" title="Back to messages" onClick={()=>setMobileRead(false)}><ChevronLeft size={19}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Archive" onClick={()=>move([currentRow.id],'Archive')}><Archive size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Trash" onClick={()=>move([currentRow.id],'Trash')}><Trash2 size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.unread?'Mark read':'Mark unread'} onClick={()=>change([currentRow.id],{unread:!currentRow.unread})}>{currentRow.unread?<MailOpen size={18}/>:<Mail size={18}/>}</button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Move message" onClick={()=>setMenu(menu==='move'?'':'move')}><MoreHorizontal size={20}/></button>{currentRow.folder!=='Inbox'&&currentRow.folder!=='Sent'&&<button className="icon" title="Restore message" onClick={()=>move([currentRow.id],currentRow.previousFolder==='Sent'?'Sent':'Inbox')}><RotateCcw size={17}/></button>}{menu==='move'&&<div className="popover move">{['Inbox','Archive','Trash','Spam'].map(f=><button key={f} onClick={()=>move([currentRow.id],f)}>Move to {f}</button>)}</div>}<span className="tool-space"/><span className="position">{list.findIndex(m=>m.id===currentRow.id)+1} of {list.length}</span><button className="icon next" title="Previous message" disabled={list[0]===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)-1];if(p)open(p)}}><ChevronLeft size={18}/></button><button className="icon next next-right" title="Next message" disabled={list.at(-1)===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)+1];if(p)open(p)}}><ChevronLeft size={18}/></button></div>
  <div className="reader-scroll"><div className="reader-content"><div className="subject-line"><h2>{currentRow.subject}</h2><button className={'star '+(currentRow.star?'starred':'')} disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Toggle message star" onClick={()=>change([currentRow.id],{star:!currentRow.star})}><Star size={20}/></button></div><div className="reader-tags">{tag(currentRow)}{project&&<button className="project-tag" onClick={()=>{go('Active Projects');setProjectFilter(project.id)}}><FolderKanban size={13}/>{project.name}</button>}</div>
- <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}</small></div><time>{time(currentRow.date)}</time></div>
+ <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}{currentRow.folder==='Sent'&&currentRow.bcc&&' · Bcc: '+currentRow.bcc}</small></div><time>{time(currentRow.date)}</time></div>
  {currentRow.due&&<div className="deadline"><div className="deadline-icon"><Clock3 size={19}/></div><div><b>Bid submission deadline</b><span>{day(currentRow.due+'T12:00:00')}</span></div><span className="tag gold">Open bid</span></div>}
  {renderBody(currentRow)}
  {liveToken&&renderAttachments(currentRow)}
@@ -618,7 +623,7 @@ function App({liveToken,onSignOut,largeUploads=false}:{liveToken?:string;onSignO
  {draft&&<div className="modal-back compose-overlay" onClick={closeDraft}><form ref={composeWindow.panel} style={composeWindow.position||undefined} className={"compose-panel"+(composeWindow.position?" compose-positioned":"")} role="dialog" aria-label="Compose message" aria-modal="true"
  onDragOver={event=>{if(event.dataTransfer.types.includes('Files')){event.preventDefault();event.dataTransfer.dropEffect=saving||sending?'none':'copy';setDraggingFiles(!saving&&!sending)}}}
  onDragLeave={event=>{if(!(event.relatedTarget instanceof Node)||!event.currentTarget.contains(event.relatedTarget))setDraggingFiles(false)}}
- onDrop={event=>{if(!event.dataTransfer.types.includes('Files'))return;event.preventDefault();setDraggingFiles(false);attachFiles(Array.from(event.dataTransfer.files))}} onClick={e=>e.stopPropagation()} onSubmit={sendDraft}><header className="compose-titlebar" onPointerDown={composeWindow.begin} onPointerMove={composeWindow.move} onPointerUp={composeWindow.end} onLostPointerCapture={composeWindow.end} onDoubleClick={event=>{if(!(event.target as HTMLElement).closest("button"))composeWindow.reset()}}><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending||saving} onClick={closeDraft}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label><textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}{draft.includeSignature!==false&&state.signatureImages?.[draft.identity]&&<img className="signature-logo" alt="Signature" src={state.signatureImages[draft.identity]}/>}</div><button type="button" className="project-tag" disabled={sending||saving} onClick={openSignatures}>Edit signature</button></div>{draft.files.length>0&&<div className="chips">{draft.files.map((f,i)=><button type="button" key={i} onClick={()=>edit({files:draft.files.filter((_,j)=>j!==i)})}>{f} ×</button>)}</div>}{draft.largeFiles?.length?<div className="chips">{draft.largeFiles.map(file=><button type="button" key={file.id} disabled={saving||sending} onClick={()=>edit({largeFiles:draft.largeFiles?.filter(item=>item.id!==file.id)})}>{file.name} · Download link ×</button>)}</div>:null}
+ onDrop={event=>{if(!event.dataTransfer.types.includes('Files'))return;event.preventDefault();setDraggingFiles(false);attachFiles(Array.from(event.dataTransfer.files))}} onClick={e=>e.stopPropagation()} onSubmit={sendDraft}><header className="compose-titlebar" onPointerDown={composeWindow.begin} onPointerMove={composeWindow.move} onPointerUp={composeWindow.end} onLostPointerCapture={composeWindow.end} onDoubleClick={event=>{if(!(event.target as HTMLElement).closest("button"))composeWindow.reset()}}><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending||saving} onClick={closeDraft}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts} lookup={contactLookup?lookupContacts:undefined}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><RecipientInput label="Bcc" value={draft.bcc||''} onChange={bcc=>edit({bcc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label><textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}{draft.includeSignature!==false&&state.signatureImages?.[draft.identity]&&<img className="signature-logo" alt="Signature" src={state.signatureImages[draft.identity]}/>}</div><button type="button" className="project-tag" disabled={sending||saving} onClick={openSignatures}>Edit signature</button></div>{draft.files.length>0&&<div className="chips">{draft.files.map((f,i)=><button type="button" key={i} onClick={()=>edit({files:draft.files.filter((_,j)=>j!==i)})}>{f} ×</button>)}</div>}{draft.largeFiles?.length?<div className="chips">{draft.largeFiles.map(file=><button type="button" key={file.id} disabled={saving||sending} onClick={()=>edit({largeFiles:draft.largeFiles?.filter(item=>item.id!==file.id)})}>{file.name} · Download link ×</button>)}</div>:null}
  {draft.forwardedAttachments?.length?<div className="chips">{draft.forwardedAttachments.map(file=><button type="button" key={file.messageId+file.part} disabled={saving||sending} onClick={()=>edit({forwardedAttachments:draft.forwardedAttachments?.filter(item=>item!==file)})}>{file.name} ×</button>)}</div>:null}
  {draft.stagedAttachments?.length?<div className="chips">{draft.stagedAttachments.map(file=><button type="button" key={file.id} disabled={saving||sending} onClick={()=>edit({stagedAttachments:draft.stagedAttachments?.filter(item=>item.id!==file.id)})}>{file.name} ×</button>)}</div>:null}
  {draft.attachments?.length?<div className="chips">{draft.attachments.map((file,index)=><button type="button" key={index} disabled={saving||sending} onClick={()=>edit({attachments:draft.attachments?.filter((_,i)=>i!==index)})}>{file.name} ×</button>)}</div>:null}
@@ -652,7 +657,7 @@ function App({liveToken,onSignOut,largeUploads=false}:{liveToken?:string;onSignO
  {toast&&<div className="toast" role="status"><Check size={17}/>{toast}</div>}
  </div>
 }
-function HostedInbox({ready,highLevelOrigins,highLevelIssues,largeUploads}:{ready:boolean;highLevelOrigins:string[];highLevelIssues:string[];largeUploads:boolean}) {
+function HostedInbox({ready,highLevelOrigins,highLevelIssues,largeUploads,contactLookup}:{ready:boolean;highLevelOrigins:string[];highLevelIssues:string[];largeUploads:boolean;contactLookup:boolean}) {
  const [token,setToken]=useState('');
  const canAutoSignIn=ready&&window.parent!==window&&highLevelOrigins.length>0;
  const [attempt,setAttempt]=useState(canAutoSignIn?1:0);
@@ -674,7 +679,7 @@ function HostedInbox({ready,highLevelOrigins,highLevelIssues,largeUploads}:{read
   return ()=>controller.abort();
  },[attempt,highLevelOrigins]);
 
- if (token) return <App liveToken={token} largeUploads={largeUploads} onSignOut={error=>{setNotice(error?highLevelSignInNotice(error):'');setToken('');setAttempt(0)}}/>;
+ if (token) return <App liveToken={token} largeUploads={largeUploads} contactLookup={contactLookup} onSignOut={error=>{setNotice(error?highLevelSignInNotice(error):'');setToken('');setAttempt(0)}}/>;
  if (checking) return <div className="login-page" role="status">
   <div className="signature-settings signature-fields"><h1>Signing in through HighLevel…</h1>
   <button className="project-tag" onClick={()=>{setAttempt(0);setChecking(false)}}>Use mailbox password instead</button></div>
@@ -688,6 +693,6 @@ const root=createRoot(document.getElementById('root')!);
 if (localToken) root.render(<App liveToken={localToken}/>);
 else if (import.meta.env.PROD && !['127.0.0.1','localhost','[::1]'].includes(location.hostname)) {
  hostedRequest('status').then(status=>{
-  root.render(status.live?<HostedInbox ready={status.ready} highLevelOrigins={status.highLevelOrigins||[]} highLevelIssues={status.highLevelIssues||[]} largeUploads={status.largeFiles===true}/>:<App/>);
+  root.render(status.live?<HostedInbox ready={status.ready} highLevelOrigins={status.highLevelOrigins||[]} highLevelIssues={status.highLevelIssues||[]} largeUploads={status.largeFiles===true} contactLookup={status.contactLookup===true}/>:<App/>);
  }).catch(()=>root.render(<div className="login-page" role="alert">The mailbox service is unavailable. Reload to try again.</div>));
 } else root.render(<App/>);

@@ -1,3 +1,4 @@
+import {contactsConfig,searchContacts} from '../../server/ghl-contacts.mjs';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { stagedAttachments, stagedFiles, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
 import { largeFileLinks,largeFileRefs,largeFilesEnabled } from '../../server/large-file-links.mjs';
@@ -44,12 +45,13 @@ async function readInput(request, limit) {
  catch { throw new TypeError('Invalid request body.'); }
 }
 
-export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments}={}) {
+export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments,lookupContacts=searchContacts}={}) {
  const enabled = env.A2Z_MODE==='live';
  const allowed = new Set((env.IONOS_ALLOWED_MAILBOXES||'').split(',').map(value=>value.trim().toLowerCase()).filter(Boolean));
  const ready = enabled && allowed.size>0 && (env.SESSION_SECRET||'').length>=32;
  const highLevelSetup = ready ? createHighLevelLogin(env,allowed) : null;
  const highLevel=highLevelSetup?.login;
+ const contacts=ready?contactsConfig(env):null;
  const key = ready ? createHash('sha256').update(env.SESSION_SECRET).digest() : null;
  const configFor = ({email,password}) => ionosConfig({
   A2Z_MODE:'live', A2Z_ENABLE_LIVE:'true', IONOS_EMAIL:email, IONOS_PASSWORD:password,
@@ -58,7 +60,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  return async function handler(request) {
   const url = new URL(request.url);
   const action = url.searchParams.get('action');
-  if (action==='status' && request.method==='GET') return reply({live:enabled,ready,highLevelOrigins:highLevel?.origins||[],highLevelIssues:highLevelSetup?.issues||[],largeFiles:enabled&&largeFilesEnabled(env)});
+  if (action==='status' && request.method==='GET') return reply({live:enabled,ready,highLevelOrigins:highLevel?.origins||[],highLevelIssues:highLevelSetup?.issues||[],largeFiles:enabled&&largeFilesEnabled(env),contactLookup:Boolean(contacts)});
   if (!ready) return reply({error:'Hosted IONOS is unavailable. Check the deployment settings.'},503);
   const origin = request.headers.get('origin');
   if (origin && origin!==url.origin) return reply({error:'Invalid request origin.'},403);
@@ -96,6 +98,11 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     error:'Sign in to your IONOS mailbox again.',
     reason:session?.highLevel?'ghl_mailbox':'session_expired',
    },401);
+   if (action==='contacts' && request.method==='POST') {
+    if (!contacts || (session?.highLevel && session.highLevel.activeLocation!==contacts.locationId)) return reply({contacts:[]});
+    const input=await readInput(request,2048);
+    return reply({contacts:await lookupContacts(contacts,input?.query)});
+   }
    if (['large-start','large-finish','large-abort'].includes(action)&&request.method==='POST') {
     const input=await readInput(request,16000);
     const storage=largeFileLinks(env,login.email);
@@ -180,6 +187,9 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='update' && request.method==='POST') return reply(await mailbox.update(await readInput(request,4096)));
    return reply({error:'Unknown mailbox action.'},404);
   } catch(error) {
+   if (action==='contacts') return reply({
+    error:error instanceof TypeError?'Invalid contact search.':'HighLevel contacts are temporarily unavailable.',
+   },error instanceof TypeError?400:502);
    if (action?.startsWith('large-')) {
     return reply({error:error instanceof TypeError?error.message:'Large file storage could not complete the upload. Try again.'},error instanceof TypeError?400:502);
    }

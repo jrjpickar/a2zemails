@@ -2,9 +2,9 @@ import {useState,type FormEvent} from 'react';
 
 export const hostedEndpoint='/.netlify/functions/ionos';
 
-export async function hostedRequest(action:string, body?:object, token?:string) {
+export async function hostedRequest(action:string, body?:object, token?:string, signal?:AbortSignal) {
  const response = await fetch(hostedEndpoint+'?action='+action,{
-  method:body?'POST':'GET',cache:'no-store',
+  method:body?'POST':'GET',cache:'no-store',signal,
   headers:{...(token?{Authorization:'Bearer '+token}:{}),...(body?{'Content-Type':'application/json'}:{})},
   body:body?JSON.stringify(body):undefined,
  });

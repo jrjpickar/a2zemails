@@ -452,3 +452,56 @@ test('large file links sign upload parts for 1 GB and send a time-limited privat
  assert.deepEqual(links,[{name:file.name,url:'https://r2.example/download?expires=604800'}]);
  await assert.rejects(storage.begin({draftId,file:{...file,size:LARGE_FILE_LIMIT+1}}),/up to 1 GB/);
 });
+
+test('Bcc is routed by SMTP without a public header and preserved in the sender’s Sent copy', async () => {
+ const {default:nodemailer}=await import('nodemailer');
+ let smtpEnvelope,smtpHeaders,sentHeaders;
+ const headers=buffer=>buffer.toString().split('\r\n\r\n',1)[0];
+ class SentImap {
+  async connect(){}
+  async list(){return [{path:'Sent',specialUse:'\\Sent',flags:new Set()}];}
+  async append(path,bytes){
+   assert.equal(path,'Sent');
+   sentHeaders=headers(bytes);
+   return {};
+  }
+  close(){}
+ }
+ const mailbox=createIonosMailbox(ionosConfig(env),{
+  Imap:SentImap,
+  transport:()=>nodemailer.createTransport({
+   name:'fixture-smtp',version:'1',
+   send(message,callback) {
+    smtpEnvelope=message.message.getEnvelope();
+    message.message.build((error,mime)=>{
+     if (error) return callback(error);
+     smtpHeaders=headers(mime);
+     callback(null,{messageId:message.message.messageId(),rejected:[]});
+    });
+   },
+  }),
+ });
+ await mailbox.send({id:'out-12345678-1234-1234-1234-123456789012',to:'',cc:'',bcc:'blind@example.com',subject:'Mail',body:'Test'});
+ assert.deepEqual(smtpEnvelope.to,['blind@example.com']);
+ assert.doesNotMatch(smtpHeaders,/^Bcc:|blind@example\.com/im);
+ assert.match(sentHeaders,/^Bcc: blind@example\.com/im);
+});
+
+test('HighLevel lookup sends only the configured location and returns deduplicated recipient fields', async () => {
+ const {contactsConfig,searchContacts}=await import('../server/ghl-contacts.mjs');
+ const config=contactsConfig({GHL_CONTACTS_PIT_TOKEN:'fixture-token',GHL_LOCATION_IDS:'a,b',GHL_CONTACTS_LOCATION_ID:'b'});
+ assert.equal(contactsConfig({GHL_CONTACTS_PIT_TOKEN:'fixture-token',GHL_LOCATION_IDS:'a,b'}),null);
+ const matches=await searchContacts(config,'Pat',async(url,options)=>{
+  assert.equal(url,'https://services.leadconnectorhq.com/contacts/search');
+  assert.equal(options.headers.Authorization,'Bearer fixture-token');
+  assert.equal(options.headers.Version,'v3');
+  assert.deepEqual(JSON.parse(options.body),{locationId:'b',query:'Pat',page:1,pageLimit:12});
+  return Response.json({contacts:[
+   {firstName:'Pat',lastName:'Lee',email:'pat@example.com',locationId:'b',phone:'555-0100'},
+   {email:'PAT@example.com',locationId:'b'},
+   {email:'other@example.com',locationId:'a'},
+   {firstName:'Missing email',locationId:'b'},
+  ]});
+ });
+ assert.deepEqual(matches,[{name:'Pat Lee',address:'pat@example.com',source:'HighLevel'}]);
+});

@@ -118,3 +118,9 @@ To enable link uploads, create a **private R2 bucket** and a bucket-scoped token
 ```
 
 Keep the bucket private. Enable lifecycle cleanup for incomplete multipart uploads. If you configure expiry for completed objects, allow at least seven days after sending and sufficient time for saved drafts. Link uploads go straight from the browser to R2. IONOS receives a small email with URLs, and Netlify Functions do not handle the 1 GB file bytes.
+
+## Bcc and HighLevel recipient lookup
+
+Use **Bcc** in Compose for blind recipients. Bcc is saved with drafts and appears in your Sent copy, while outgoing SMTP uses it only in the delivery envelope. Reply All never adds Bcc recipients.
+
+To enable CRM suggestions in **To**, create a HighLevel **sub-account Private Integration Token** with only `contacts.readonly`. Set `GHL_CONTACTS_PIT_TOKEN` for Production → Functions in Netlify and redeploy. If `GHL_LOCATION_IDS` contains exactly one location, lookup uses it. Otherwise set `GHL_CONTACTS_LOCATION_ID` to the location the PIT belongs to. The app searches that one sub-account for signed-in mailbox users. For embedded HighLevel sessions, their active location must match the configured lookup location. Lookup returns names and email addresses only. If HighLevel is unavailable, mailbox suggestions and manual entry still work. [HighLevel Search Contacts](https://marketplace.gohighlevel.com/docs/ghl/contacts/search-contacts-advanced/index.html)

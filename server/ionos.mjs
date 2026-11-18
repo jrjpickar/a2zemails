@@ -128,7 +128,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    const sent=folders.find(folder=>folder.specialUse==='\\Sent') ||
     folders.find(folder=>folderAliases.get(folder.path.toLowerCase())==='Sent');
    if (!sent) return false;
-   const mime=await nodemailer.createTransport({streamTransport:true,buffer:true}).sendMail(message);
+   const mime=await nodemailer.createTransport({streamTransport:true,buffer:true}).sendMail({...message,keepBcc:true});
    return Boolean(await imap.append(sent.path,mime.message,['\\Seen']));
   } catch { return false; }
   finally {imap.close();}
@@ -186,7 +186,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
       mail.push({
        id, thread:references[0]||headerId||id, name:envelope?.from?.[0]?.name||from||'Unknown sender',
        company:'', subject, body, needsBody, date:item.internalDate?.toISOString()||new Date(0).toISOString(),
-       from,to:addressList(envelope?.to),cc:addressList(envelope?.cc),
+       from,to:addressList(envelope?.to),cc:addressList(envelope?.cc),bcc:folder==='Sent'?(addressList(envelope?.bcc)||addressList(parsed?.bcc?.value)):'',
        category,project:'',folder,unread:!item.flags.has('\\Seen'),star:item.flags.has('\\Flagged'),
        files:attachments.length?attachments.map(file=>file.name):(parsed?.attachments||[]).map(file=>file.filename||'Attachment'),attachments,
        due:category==='Bid Invitations'?bidDue(subject,body):undefined,
@@ -401,9 +401,9 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   },
   async send(input, uploaded=[], links=[]) {
    const addresses = value => typeof value === 'string' ? value.split(/[,;]/).map(part=>part.trim()).filter(Boolean) : [];
-   const to = addresses(input?.to), cc = addresses(input?.cc);
+   const to = addresses(input?.to), cc = addresses(input?.cc), bcc = addresses(input?.bcc);
    const {subject,body,id} = input || {};
-   if (!to.length || to.length+cc.length>50 || [...to,...cc].some(value=>!mailboxAddress.test(value)) ||
+   if (!to.length&&!cc.length&&!bcc.length || to.length+cc.length+bcc.length>50 || [...to,...cc,...bcc].some(value=>!mailboxAddress.test(value)) ||
        typeof subject!=='string' || !subject.trim() || subject.length>500 || /[\r\n]/.test(subject) ||
        typeof body!=='string' || (!body.trim()&&!links.length) || body.length>150000 ||
        typeof id!=='string' || !/^out-[0-9a-f-]{36}$/i.test(id)) {
@@ -431,7 +431,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    const html=inline||links.length?'<div style="white-space:pre-wrap">'+escape(body)+'</div>'+inlineHtml+linksHtml:undefined;
    if (inline) attachments.push({filename:'signature.'+inline.type.split('/')[1],content:inline.content,contentType:inline.type,cid});
    const message = {
-    from:config.email,to,cc,subject,text:body+linksText,html,attachments:[...attachments,...uploaded],
+    from:config.email,to,cc,bcc,subject,text:body+linksText,html,attachments:[...attachments,...uploaded],
     messageId:'<'+id+'@'+config.email.split('@')[1]+'>',
     references:refs,inReplyTo:refs.at(-1),disableFileAccess:true,disableUrlAccess:true,
    };
