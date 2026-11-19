@@ -257,13 +257,23 @@ select, kbd, .project-tag, .gray, .attachments h3 span, .chips button { backgrou
  width: auto;
  accent-color: var(--accent);
 }
-.mail-row .row-delete {
+.mail-row .row-mail-actions {
  flex: 0 0 auto;
  align-self: center;
  margin-right: 8px;
 }
 @media (hover: hover) and (pointer: fine) {
- .mail-row .row-delete { opacity: 0; }
- .mail-row:hover .row-delete, .mail-row:focus-within .row-delete { opacity: 1; }
+ .mail-row .row-mail-actions { opacity: 0; }
+ .mail-row:hover .row-mail-actions, .mail-row:focus-within .row-mail-actions { opacity: 1; }
 }
 .thread-attachments { margin-bottom: 16px; }
+
+.draft-attachment { display:inline-flex; max-width:100%; align-items:stretch; gap:2px; }
+.draft-attachment button { display:inline-flex; align-items:center; gap:5px; min-width:0; }
+.draft-attachment svg { flex:none; }
+.draft-attachment span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+
+.row-mail-actions { display:flex; gap:2px; }
+.row-mail-actions button { padding:5px; }
+.delete-confirmation-actions { display:flex; justify-content:flex-end; gap:8px; }

@@ -1,6 +1,6 @@
 import {contactsConfig,searchContacts} from '../../server/ghl-contacts.mjs';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
-import { stagedAttachments, stagedFiles, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
+import { stagedAttachments, stagedFiles, CHUNK_BYTES, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
 import { largeFileLinks,largeFileRefs,largeFilesEnabled } from '../../server/large-file-links.mjs';
 import { REQUEST_LIMIT } from '../../server/mail-attachments.mjs';
 import { mailboxPreferences } from '../../server/mail-preferences.mjs';
@@ -119,10 +119,14 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const input=await readInput(request,2048);
     return reply({contacts:await lookupContacts(contacts,input?.query)});
    }
-   if (['large-start','large-finish','large-abort'].includes(action)&&request.method==='POST') {
+   if (['large-start','large-finish','large-abort','large-download'].includes(action)&&request.method==='POST') {
     const input=await readInput(request,16000);
     const storage=largeFileLinks(env,login.email);
     if (action==='large-start') return reply(await storage.begin(input));
+    if (action==='large-download') {
+     const [file]=await storage.links(input?.draftId,[input?.file],{expiresIn:300});
+     return reply(file);
+    }
     if (action==='large-finish') await storage.complete(input);
     else await storage.abort(input);
     return reply({ok:true});
@@ -130,6 +134,18 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='upload' && request.method==='POST') {
     await uploadsFactory(login.email).upload(await readInput(request,UPLOAD_REQUEST_LIMIT));
     return reply({ok:true});
+   }
+   if (action==='draft-attachment-chunk' && request.method==='POST') {
+    const input=await readInput(request,4096);
+    const [file]=stagedFiles([input?.file]);
+    const {index,draftId}=input;
+    if (!Number.isInteger(index)||index<0||index>=Math.ceil(file.size/CHUNK_BYTES)) {
+     throw new TypeError('Invalid attachment chunk.');
+    }
+    const chunk=await uploadsFactory(login.email).readChunk(draftId,file.id,index);
+    const expected=Math.min(CHUNK_BYTES,file.size-index*CHUNK_BYTES);
+    return chunk?.length===expected ? reply({data:chunk.toString('base64')}) :
+     reply({error:'This attachment is incomplete or no longer available.'},404);
    }
    if (action==='preferences' && request.method==='GET') return reply(await preferencesFactory(login.email).load());
    if (action==='draft' && request.method==='GET') {
@@ -207,9 +223,9 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     error:error instanceof TypeError?'Invalid contact search.':'HighLevel contacts are temporarily unavailable.',
    },error instanceof TypeError?400:502);
    if (action?.startsWith('large-')) {
-    return reply({error:error instanceof TypeError?error.message:'Large file storage could not complete the upload. Try again.'},error instanceof TypeError?400:502);
+    return reply({error:error instanceof TypeError?error.message:action==='large-download'?'Could not open the download link. Try again.':'Large file storage could not complete the upload. Try again.'},error instanceof TypeError?400:502);
    }
-   if (action?.startsWith('attachment')) {
+   if (action?.startsWith('attachment')||action==='draft-attachment-chunk') {
     return reply({error:error instanceof TypeError?error.message:'Could not load the attachment. Try again.'},error instanceof TypeError?400:502);
    }
    if (['preferences','draft','signature','upload'].includes(action)) {

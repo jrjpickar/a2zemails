@@ -137,29 +137,42 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
  assert.equal((await call('session',{token:remembered})).status,401);
 });
 
-test('moving incoming mail uses the Trash folder and ignores deleted IMAP entries', async () => {
- let moved=false;
+test('Trash creates a retained folder and permanent deletion targets only a Trash UID', async () => {
  const inbox={path:'INBOX',flags:new Set()};
  const trash={path:'Deleted Items',specialUse:'\\Trash',flags:new Set()};
+ const retained={path:'A2Z Trash',flags:new Set()};
+ let created=false, moved=false, deleted=false, supportsUidPlus=true;
  class FakeImap {
+  get capabilities() {return new Map(supportsUidPlus?[['UIDPLUS',true]]:[]);}
   async connect() {}
-  async list() {return [trash,inbox,{path:'Completed Jobs',flags:new Set()}];}
+  async list() {return [trash,inbox,{path:'Completed Jobs',flags:new Set()},...(created?[retained]:[])];}
+  async mailboxCreate(path) {
+   assert.equal(path,retained.path);
+   created=true;
+  }
   async getMailboxLock(path) {
    this.path=path;
-   this.mailbox={exists:path==='Completed Jobs'?0:1,uidValidity:22n};
+   const exists=path===inbox.path&&!moved||path===retained.path&&moved&&!deleted;
+   this.mailbox={exists:exists?1:0,uidValidity:22n};
    return {release(){}};
   }
   async fetchAll(_range,fields) {
-   if (fields.source||(this.path===trash.path&&!moved)) return [];
-   return [{uid:4,flags:new Set(this.path===inbox.path&&moved?['\\Deleted']:[]),size:40,
-    envelope:{subject:'Invoice for Harbor Point'}}];
+   if (fields.source) return [];
+   return [{uid:4,flags:new Set(),size:40,envelope:{subject:'Invoice for Harbor Point'}}];
   }
   async messageMove(uid,destination,options) {
    assert.equal(uid,'4');
-   assert.equal(destination,trash.path);
+   assert.equal(destination,retained.path);
    assert.deepEqual(options,{uid:true});
    moved=true;
    return {destination};
+  }
+  async messageDelete(uid,options) {
+   assert.equal(this.path,retained.path);
+   assert.equal(uid,'4');
+   assert.deepEqual(options,{uid:true});
+   deleted=true;
+   return true;
   }
   close() {}
  }
@@ -167,8 +180,20 @@ test('moving incoming mail uses the Trash folder and ignores deleted IMAP entrie
  const before=await mailbox.mail();
  assert.deepEqual(before.folders,['Inbox','Trash','Completed Jobs']);
  assert.equal(before.mail[0].project,'P-241');
+ const remove=id=>mailbox.update({id,action:'delete-forever'});
+ assert.match((await remove('INBOX:22:4')).error,/Move the message to Trash/);
  assert.deepEqual(await mailbox.update({id:'INBOX:22:4',action:'move',destination:'Trash'}),{ok:true});
- assert.deepEqual((await mailbox.mail()).mail.map(message=>message.folder),['Trash']);
+ const {mail}=await mailbox.mail();
+ assert.deepEqual(mail.map(message=>message.folder),['Trash']);
+ assert.equal(mail[0].id,'A2Z Trash:22:4');
+ assert.deepEqual((await mailbox.mail({includeTrash:false})).mail,[]);
+ supportsUidPlus=false;
+ assert.match((await remove(mail[0].id)).error,/cannot safely delete/);
+ supportsUidPlus=true;
+ assert.match((await remove('A2Z Trash:21:4')).error,/mailbox changed/);
+ assert.equal(deleted,false);
+ assert.deepEqual(await remove(mail[0].id),{ok:true});
+ assert.deepEqual((await mailbox.mail()).mail,[]);
 });
 
 test('opening a large IONOS email fetches only its readable MIME body', async () => {
@@ -207,7 +232,7 @@ test('opening a large IONOS email fetches only its readable MIME body', async ()
    assert.equal(options.uid,true);
    assert.equal(options.maxBytes,1024*1024+1);
    if (part==='4') return {content:Readable.from([Buffer.from('iVBORw0KGgo=','base64')])};
-   const body=part==='1.1'?'  ':'<p>Use the <strong>revised plans</strong>.</p><img src="https://example.com/pixel"><img src="cid:logo@sample">';
+   const body=part==='1.1'?'  ':'<p>Use the <strong>revised plans</strong>.</p><img src="https://example.com/pixel"><img src="cid:%3Clogo@sample%3E">';
    return {content:Readable.from([Buffer.from(body)])};
   }
   close() {}
@@ -249,9 +274,14 @@ test('HighLevel auto sign-in uses only a matching allowed mailbox in the approve
   GHL_APP_SHARED_SECRET:secret,GHL_COMPANY_ID:'company-1',GHL_LOCATION_IDS:'location-1',
   GHL_IONOS_MAILBOX_PASSWORDS:JSON.stringify({[env.IONOS_EMAIL]:env.IONOS_PASSWORD}),
  };
+ const stagedFile={id:'12345678-1234-4321-8999-123456789012',name:'plans.pdf',size:5};
+ const draftId='0d8bac5c-d3f4-4fa5-ad0b-e967daee3afd';
  const deps={mailboxFactory:mailConfig=>({mail:async()=>{
   assert.equal(mailConfig.imap.auth.pass,env.IONOS_PASSWORD);
   return {email:mailConfig.email,mail:[]};
+ }}),uploadsFactory:email=>({readChunk:async(draft,file,index)=>{
+  assert.deepEqual([email,draft,file,index],[env.IONOS_EMAIL,draftId,stagedFile.id,0]);
+  return Buffer.from('%PDF-');
  }})};
  const handler=createHostedHandler(config,deps);
  const call=(action,{body,token}={},handle=handler)=>handle(new Request('https://inbox.example/.netlify/functions/ionos?action='+action,{
@@ -270,6 +300,12 @@ test('HighLevel auto sign-in uses only a matching allowed mailbox in the approve
  const {token,email}=await result.json();
  assert.equal(email,env.IONOS_EMAIL);
  assert.equal((await call('mail',{token})).status,200);
+ const body={draftId,file:stagedFile,index:0};
+ assert.equal((await call('draft-attachment-chunk',{body})).status,401);
+ assert.equal((await call('draft-attachment-chunk',{body:{...body,index:1},token})).status,400);
+ const chunk=await call('draft-attachment-chunk',{body,token});
+ assert.equal(chunk.status,200);
+ assert.equal(Buffer.from((await chunk.json()).data,'base64').toString(),'%PDF-');
  const rejected=createHostedHandler(config,{mailboxFactory:()=>({mail:async()=>{
   throw Object.assign(new Error('authentication rejected'),{authenticationFailed:true});
  }})});
@@ -287,7 +323,11 @@ test('saved drafts keep attachments and signatures under the authenticated mailb
   async get(key) {return records.get(key)?.data??null;},
   async getMetadata(key) {return records.get(key)||null;},
   async list({prefix}) {return {blobs:[...records.keys()].filter(key=>key.startsWith(prefix)).map(key=>({key}))};},
-  async setJSON(key,data,{metadata}={}) {records.set(key,{data,metadata});},
+  async setJSON(key,data,{metadata,onlyIfNew}={}) {
+   if (onlyIfNew&&records.has(key)) return {modified:false};
+   records.set(key,{data,metadata});
+   return {modified:true};
+  },
   async delete(key) {records.delete(key);},
  };
  const first=mailboxPreferences('one@example.com',store);
@@ -295,6 +335,24 @@ test('saved drafts keep attachments and signatures under the authenticated mailb
  const id='0d8bac5c-d3f4-4fa5-ad0b-e967daee3afd';
  const attachments=[{name:'plans.txt',data:Buffer.from('test plans').toString('base64')}];
  await first.saveDraft({id,to:'gc@example.com',cc:'',subject:'Revised plans',body:'Draft message',attachments,identity:'two@example.com'});
+ const {createMailFeedHandler}=await import('../netlify/functions/mail-feed.mjs');
+ const draftToken='fixture-mail-draft-token-at-least-32-characters';
+ const readToken='fixture-mail-read-token-at-least-32-characters';
+ const handler=createMailFeedHandler({
+  A2Z_MODE:'live',MCP_MAIL_TOKEN:readToken,MCP_MAIL_DRAFT_TOKEN:draftToken,
+  MCP_IONOS_EMAIL:'one@example.com',MCP_IONOS_PASSWORD:'test',IONOS_ALLOWED_MAILBOXES:'one@example.com',
+ },{preferences:email=>mailboxPreferences(email,store),makeMailbox:()=>assert.fail('Drafts do not use IMAP or SMTP')});
+ const draft={id:'1269fce3-ae54-4d08-bd4c-618f4828ea13',body:'Draft for review'};
+ const post=(data,token=draftToken)=>handler(new Request('https://test.example/api/mcp/mail/draft',{
+  method:'POST',headers:{Authorization:'Bearer '+token},body:JSON.stringify(data),
+ }));
+ assert.equal((await post(draft,readToken)).status,401);
+ assert.equal((await post(draft)).status,200);
+ assert.equal((await post(draft)).status,200);
+ assert.equal((await post({...draft,body:'Different text'})).status,409);
+ assert.equal((await first.loadDraft(draft.id)).body,draft.body);
+ assert.equal(await second.loadDraft(draft.id),null);
+ await first.discard(draft.id);
  const logo='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
  await first.saveSignature('Operations\nA2Z Construction',logo);
  await second.saveSignature('');

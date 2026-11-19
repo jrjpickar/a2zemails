@@ -12,7 +12,7 @@ export function createCommandCenterHandler(env,makeMailbox=createIonosMailbox) {
   const {email,password}=login;
   try {
    const mailbox=makeMailbox(ionosConfig({...env,A2Z_ENABLE_LIVE:'true',IONOS_EMAIL:email,IONOS_PASSWORD:password}));
-   const {mail}=await mailbox.mail();
+   const {mail}=await mailbox.mail({includeTrash:false});
    return reply({stats:commandCenterStats(mail),asOf:new Date().toISOString(),coverage:'recent_mail'});
   } catch {
    console.warn('[MCP] Command Center mailbox could not be read.');

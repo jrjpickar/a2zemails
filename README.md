@@ -126,3 +126,22 @@ Keep the bucket private. Enable lifecycle cleanup for incomplete multipart uploa
 To, Cc, and Bcc each accept multiple addresses. Type an address and press Enter, choose a suggestion, or paste addresses separated by commas, semicolons, or newlines. Use **Bcc** in Compose for blind recipients. Bcc is saved with drafts and appears in your Sent copy, while outgoing SMTP uses it only in the delivery envelope. Reply All never adds Bcc recipients.
 
 To enable CRM suggestions in **To**, create a HighLevel **sub-account Private Integration Token** with only `contacts.readonly`. Set `GHL_CONTACTS_PIT_TOKEN` for Production → Functions in Netlify and redeploy. If `GHL_LOCATION_IDS` contains exactly one location, lookup uses it. Otherwise set `GHL_CONTACTS_LOCATION_ID` to the location the PIT belongs to. The app searches that one sub-account for signed-in mailbox users. For embedded HighLevel sessions, their active location must match the configured lookup location. Lookup returns names and email addresses only. If HighLevel is unavailable, mailbox suggestions and manual entry still work. [HighLevel Search Contacts](https://marketplace.gohighlevel.com/docs/ghl/contacts/search-contacts-advanced/index.html)
+
+
+## MCP Command Center queues and drafts
+
+Use `GET /api/mcp/mail/command-center` with `MCP_MAIL_TOKEN` for the counters, up to five entries per queue, and recent activity. The counts-only endpoint continues to use `MCP_COMMAND_CENTER_TOKEN`.
+
+Set a separate `MCP_MAIL_DRAFT_TOKEN` of at least 32 characters in Production → Functions on both sites. `POST /api/mcp/mail/draft` takes a UUID `id`, a plain-text `body`, and optional `to`, `cc`, `bcc`, and `subject`. The draft is stored in the hosted Inbox app under `MCP_IONOS_EMAIL`. Open **Drafts** while signed in to that mailbox to review it. Repeating the same draft ID and content is safe. A conflicting ID returns HTTP 409.
+
+
+In the compose window, select an attachment's name to preview a PDF or supported image, or to download other file types. This also works with forwarded files and uploaded attachments in saved drafts. Large files added as download links use a short-lived download URL. The separate Remove button leaves the draft open.
+
+Sent messages and expanded conversation entries show the signature saved with that message, including supported inline signature images. Historical messages need the signature image in their original stored email.
+
+
+## Trash and message actions
+
+The Inbox uses an ordinary IMAP folder named **A2Z Trash** for newly trashed messages. It appears together with existing IONOS Trash in the app and keeps the new messages recoverable for at least 30 days unless they are deleted manually. A2Z keeps them past 30 days as well. Messages previously moved into IONOS Trash by another client still follow that client's or provider's settings.
+
+Use **Restore message** or the Move menu to recover an email. **Delete forever** asks for confirmation and permanently removes the selected message from Trash when the IMAP server supports targeted UID expunge. Hover over a message row or focus it with the keyboard to **Mark as read** or **Mark as unread** next to Trash.

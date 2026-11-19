@@ -2,6 +2,8 @@ import {randomUUID} from 'node:crypto';
 import {getStore} from '@netlify/blobs';
 import {mcpMailboxLogin} from '../../server/mcp-mail-auth.mjs';
 import {createIonosMailbox,ionosConfig} from '../../server/ionos.mjs';
+import {mailboxPreferences} from '../../server/mail-preferences.mjs';
+import {dashboardQueues,commandCenterStats} from '../../src/model.mjs';
 import {stagedAttachments} from '../../server/staged-attachments.mjs';
 
 const base='/api/mcp/mail';
@@ -20,17 +22,33 @@ const integer=(query,key,min,max,defaultValue)=>{
 
 export function createMailFeedHandler(env,{
  makeMailbox=createIonosMailbox,
+ preferences=mailboxPreferences,
  downloads=email=>stagedAttachments(email,getStore({name:'mcp-mail-downloads',consistency:'strong'})),
 }={}) {
  return async request=>{
   if (!['GET','POST','DELETE'].includes(request.method)) return json({error:'Method not allowed.'},405);
-  const login=mcpMailboxLogin(env,request,'MCP_MAIL_TOKEN');
-  if (login.status) return json({error:login.status===401?'Unauthorized':'Mailbox feed is unavailable.'},login.status);
-  const {email,password}=login;
   const url=new URL(request.url);
   const action=url.pathname.slice(base.length).replace(/^\//,'');
+  const login=mcpMailboxLogin(env,request,action==='draft'?'MCP_MAIL_DRAFT_TOKEN':'MCP_MAIL_TOKEN');
+  if (login.status) return json({error:login.status===401?'Unauthorized':'Mailbox feed is unavailable.'},login.status);
+  const {email,password}=login;
   const params=url.searchParams;
   try {
+   if (action==='draft' && request.method==='POST') {
+    const raw=await request.text();
+    if (raw.length>16000) return json({error:'Draft request is too large.'},413);
+    let input;
+    try {input=JSON.parse(raw);} catch {return json({error:'Invalid draft JSON.'},400);}
+    const {id,to='',cc='',bcc='',subject='',body}=input??{};
+    if (typeof id!=='string') throw new TypeError('Invalid draft ID.');
+    if (typeof body!=='string'||!body.trim()||body.length>10000) throw new TypeError('Enter a draft body.');
+    for (const value of [to,cc,bcc,subject]) {
+     if (typeof value!=='string'||/[\r\n\x00]/.test(value)) throw new TypeError('Invalid draft header.');
+    }
+    const saved=await preferences(email).saveDraft({id,to,cc,bcc,subject,body},{createOnly:true});
+    return saved?json({id,status:'draft_saved'}):json({error:'A different draft already uses that ID.'},409);
+   }
+   if (action==='draft') return json({error:'Method not allowed.'},405);
    if (action==='export'&&request.method==='DELETE') {
     await downloads(email).clean(params.get('ticket'));
     return json({ok:true});
@@ -41,6 +59,12 @@ export function createMailFeedHandler(env,{
     return chunk ? new Response(chunk,{headers:{...common,'Content-Type':'application/octet-stream'}}) : missing();
    }
    const mailbox=makeMailbox(ionosConfig({...env,A2Z_ENABLE_LIVE:'true',IONOS_EMAIL:email,IONOS_PASSWORD:password}));
+   if (action==='command-center'&&request.method==='GET') {
+    const {mail}=await mailbox.mail({includeTrash:false});
+    const row=({id,subject,from,date,due})=>({id,subject,from,date,...(due?{due}:{})});
+    const queues=Object.fromEntries(Object.entries(dashboardQueues(mail)).map(([key,items])=>[key,items.slice(0,5).map(row)]));
+    return json({stats:commandCenterStats(mail),queues,recent:mail.slice(0,6).map(row),asOf:new Date().toISOString()});
+   }
    if (action==='folders'&&request.method==='GET') return json({folders:await mailbox.folders()});
    if (action==='messages'&&request.method==='GET') {
     const folder=params.get('folder')||'INBOX';

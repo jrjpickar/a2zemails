@@ -32,7 +32,7 @@ export function mailboxPreferences(email, store=getStore({name:'mail-preferences
    return {signature:typeof signature==='string'?signature:signature?.text??null,signatureImage:signature?.image??null,drafts:drafts.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt))};
   },
   async loadDraft(id) {return await store.get(fileKey(id),{type:'json'});},
-  async saveDraft(input) {
+  async saveDraft(input, {createOnly=false}={}) {
    const blobKey=fileKey(input?.id);
    const draft={
     id:input.id,identity:email,files:[],attachments:mailAttachments(input.attachments),stagedAttachments:stagedFiles(input.stagedAttachments),forwardedAttachments:forwardedReferences(input.forwardedAttachments),largeFiles:largeFileRefs(input.largeFiles),
@@ -58,7 +58,14 @@ export function mailboxPreferences(email, store=getStore({name:'mail-preferences
     if (blobs.length>=50) throw new TypeError('Discard an older draft before saving another.');
    }
    const {id,to,subject,updatedAt}=draft;
-   await store.setJSON(blobKey,draft,{metadata:{id,to,subject,updatedAt}});
+   const result=await store.setJSON(blobKey,draft,{
+    metadata:{id,to,subject,updatedAt},...(createOnly?{onlyIfNew:true}:{})
+   });
+   if (createOnly && !result?.modified) {
+    const existing=await store.get(blobKey,{type:'json'});
+    return Boolean(existing && ['to','cc','bcc','subject','body'].every(field=>existing[field]===draft[field]));
+   }
+   return true;
   },
   async discard(id) {await store.delete(fileKey(id));},
   async saveSignature(signature,image) {

@@ -5,14 +5,14 @@ import {LayoutDashboard,ClipboardList,FolderKanban,Calculator,FileQuestion,HardH
 import {categories,projects,seed,classify,matchProject,searchMail,initialState,threadFor,rowActions,appendSignature,dashboardQueues} from './model.mjs';
 import {RichMail,type MailBody} from './rich-mail';
 import {uploadLargeFile,type LargeFile} from './large-upload';
-import {AttachmentPreview,type MailAttachment,type ForwardedAttachment} from './attachment-preview';
+import {AttachmentPreview,type AttachmentSource,type MailAttachment,type ForwardedAttachment} from './attachment-preview';
 import {useComposePosition} from './compose-position';
 import {MessageText} from './message-text';
 import {RecipientInput,type Contact} from './recipient-input';
 import {rememberedSession,hostedRequest,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
 import './style.css';
 import './theme.css';
-type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
+type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;sentSignatureImage?:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
 type Upload={name:string;data:string;size?:number};
 type StagedUpload={id:string;name:string;size:number};
 type SavedDraft={id:string;to:string;subject:string;updatedAt:string};
@@ -106,7 +106,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    throw error;
   }
  }
- const [state,setState]=useState<State>(()=>getState(liveToken)),[nav,setNav]=useState('Inbox'),[selected,setSelected]=useState('mail-0'),[query,setQuery]=useState(''),[filter,setFilter]=useState('All mail'),[projectFilter,setProjectFilter]=useState(''),[marked,setMarked]=useState<string[]>([]),[compose,setCompose]=useState<string|null>(null),[preview,setPreview]=useState<string|null>(null),[livePreview,setLivePreview]=useState<{id:string;file:MailAttachment}|null>(null),[toast,setToast]=useState(''),[menu,setMenu]=useState(''),[mobileRead,setMobileRead]=useState(false),[side,setSide]=useState(false),[help,setHelp]=useState(false),[limit,setLimit]=useState(60);
+ const [state,setState]=useState<State>(()=>getState(liveToken)),[nav,setNav]=useState('Inbox'),[selected,setSelected]=useState('mail-0'),[query,setQuery]=useState(''),[filter,setFilter]=useState('All mail'),[projectFilter,setProjectFilter]=useState(''),[marked,setMarked]=useState<string[]>([]),[compose,setCompose]=useState<string|null>(null),[preview,setPreview]=useState<string|null>(null),[livePreview,setLivePreview]=useState<AttachmentSource|null>(null),[toast,setToast]=useState(''),[menu,setMenu]=useState(''),[mobileRead,setMobileRead]=useState(false),[side,setSide]=useState(false),[help,setHelp]=useState(false),[limit,setLimit]=useState(60);
  const [theme,setTheme]=useState(() => {
   try { return localStorage.getItem('a2z-theme')==='color'?'color':'dark'; }
   catch { return 'dark'; }
@@ -117,6 +117,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const [mailFolders,setMailFolders]=useState<string[]>([]);
  const [connection,setConnection]=useState(liveToken?'Connecting to IONOS…':'');
  const [sending,setSending]=useState(false);
+ const [deleteTarget,setDeleteTarget]=useState<Message|null>(null);
  const hosted=Boolean(onSignOut);
  const [saving,setSaving]=useState(false);
  const [draftSaveState,setDraftSaveState]=useState('');
@@ -167,7 +168,10 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     ...previous.mail.filter(message=>message.folder==='Sent' && message.id.startsWith('out-') &&
       !data.mail.some(fetched=>fetched.headers.messageId===message.headers.messageId))
    ]}));
-   setSelected(current=>data.mail.some(message=>message.id===current)?current:data.mail[0]?.id||'');
+   setSelected(current=>{
+    if (current.startsWith('out-')) return data.mail.find(message=>message.headers.messageId.startsWith('<'+current+'@'))?.id||current;
+    return data.mail.some(message=>message.id===current)?current:data.mail[0]?.id||'';
+   });
    setConnection('IONOS connected');
   } catch (error) {
    setConnection(error instanceof Error ? error.message : 'Unable to connect to IONOS.');
@@ -301,7 +305,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
 
  function renderBody(message:Message) {
   const result=bodies[message.id];
-  if (!message.needsBody) return <div className="body"><MessageText body={message.body}/></div>;
+  if (!message.needsBody) return <div className="body"><MessageText body={message.body}/>{message.sentSignatureImage&&<img className="signature-logo" src={message.sentSignatureImage} alt="Email signature"/>}</div>;
   if (result && 'error' in result) return <div className="body" role="status">{result.error} <button className="project-tag" onClick={()=>void loadBody(message).catch(()=>{})}>Retry</button></div>;
   if (!result) return <div className="body" role="status">Loading message from IONOS…</div>;
   return <div className="body">{result.html?<RichMail key={message.id} html={result.html} images={result.images} dark={theme==='dark'}/>:<MessageText body={result.body}/>}{result.truncated&&<p className="message-note">The text body is too long to display in full. Open this message in IONOS Webmail to read the rest.</p>}</div>;
@@ -345,6 +349,23 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   if (!await change(ids,{folder})) return;
   setMarked([]);setMobileRead(false);
   setToast(folder==='Archive'?'Conversation archived':folder==='Trash'?'Moved to Trash':'Moved to '+folder);
+ }
+ async function deleteForever(message:Message) {
+  if (message.folder!=='Trash') return;
+  await performSave(async()=>{
+   if (liveToken) {
+    await liveRequest('update',{id:message.id,action:'delete-forever'});
+    ++mailboxRevision.current;
+   }
+   setState(previous=>({...previous,mail:previous.mail.filter(item=>item.id!==message.id)}));
+   setDeleteTarget(null);
+   setMobileRead(false);
+   setToast('Message deleted forever');
+   if (liveToken) {
+    await refreshing.current;
+    void refreshMailbox();
+   }
+  });
  }
  function start(mode='new',m?:Message){
   if(compose||(liveToken&&!account))return;
@@ -539,6 +560,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   if(!recipients.length||recipients.length>50||recipients.some(s=>!/^\S+@[^@\s]+\.[^@\s]+$/.test(s))||!draft.subject.trim()||(!draft.body.trim()&&!draft.largeFiles?.length)){setToast('Enter valid recipients, a subject, and a message.');return}
   const id='out-'+draft.id;
   const body=appendSignature(draft.body,draftSignature(draft));
+  const sentSignatureImage=draft.includeSignature===false?undefined:state.signatureImages?.[draft.identity];
   const references=draft.parent?[...draft.parent.headers.references,draft.parent.headers.messageId].filter(Boolean):[];
   let messageId='<'+id+'@a2z.example>';
   let rejected: string[] = [];
@@ -549,7 +571,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    setSending(true);
    try {
     await autoSave.current;
-    const result=await liveRequest('send',{to:draft.to,cc:draft.cc,bcc:draft.bcc,subject:draft.subject,body,references,id,attachments:draft.attachments,stagedAttachments:draft.stagedAttachments,forwardedAttachments:draft.forwardedAttachments,largeFiles:draft.largeFiles,signatureImage:draft.includeSignature===false?undefined:state.signatureImages?.[draft.identity],savedDraft:hosted});
+    const result=await liveRequest('send',{to:draft.to,cc:draft.cc,bcc:draft.bcc,subject:draft.subject,body,references,id,attachments:draft.attachments,stagedAttachments:draft.stagedAttachments,forwardedAttachments:draft.forwardedAttachments,largeFiles:draft.largeFiles,signatureImage:sentSignatureImage,savedDraft:hosted});
     messageId=result.messageId;
     rejected=result.rejected;
     sentSaved=result.sentSaved;
@@ -562,7 +584,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     setSending(false);
    }
   }
-  const m:Message={id,thread:draft.thread||id,name:'A2Z Construction Services',company:'A2Z',subject:draft.subject,date:new Date().toISOString(),body,files:[...draft.files,...(draft.attachments||[]).map(file=>file.name),...(draft.stagedAttachments||[]).map(file=>file.name),...(draft.forwardedAttachments||[]).map(file=>file.name)],from:draft.identity,to:draft.to,cc:draft.cc,bcc:draft.bcc,category:classify(draft.subject,draft.body,draft.identity,state.rules),project:draft.parent?.project||matchProject(draft.subject+' '+draft.body),folder:'Sent',unread:false,star:false,headers:{messageId,references}};
+  const m:Message={id,thread:draft.thread||id,name:'A2Z Construction Services',company:'A2Z',subject:draft.subject,date:new Date().toISOString(),body,sentSignatureImage,files:[...draft.files,...(draft.attachments||[]).map(file=>file.name),...(draft.stagedAttachments||[]).map(file=>file.name),...(draft.forwardedAttachments||[]).map(file=>file.name)],from:draft.identity,to:draft.to,cc:draft.cc,bcc:draft.bcc,category:classify(draft.subject,draft.body,draft.identity,state.rules),project:draft.parent?.project||matchProject(draft.subject+' '+draft.body),folder:'Sent',unread:false,star:false,headers:{messageId,references}};
   if (liveToken) clearDraftRecovery(draft);
   if (!draftCleanupFailed) {
    ++prefsVersion.current;
@@ -576,7 +598,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   else {setState(getState());setToast('Sandbox inbox refreshed');}
  }
  function receive(){const id=crypto.randomUUID(),s=samples[2];const subject='NTP — Riverside Warehouse field mobilization';const m:Message={...s,id,thread:id,subject,date:new Date().toISOString(),body:'Notice to proceed is approved. Please confirm the mobilization window with field operations.',category:classify(subject,'',s.from,state.rules),project:matchProject(subject),unread:true,star:false,files:[],headers:{messageId:'<'+id+'@a2z.example>',references:[]}};setState(s=>({...s,mail:[m,...s.mail]}));go('Inbox');setToast('Sample email received')}
- useEffect(()=>{function key(e:KeyboardEvent){if(e.key==='Escape'){if(livePreview)setLivePreview(null);else if(preview)setPreview(null);else if(signatureForm&&!saving)setSignatureForm(null);else if(compose&&!sending&&!saving)closeDraft();else if(help)setHelp(false);else {setMenu('');setMobileRead(false)}return}const editable=(e.target instanceof HTMLElement ? e.target : document.body).closest('input,textarea,select,[contenteditable="true"]');
+ useEffect(()=>{function key(e:KeyboardEvent){if(e.key==='Escape'){if(livePreview)setLivePreview(null);else if(preview)setPreview(null);else if(deleteTarget){if(!saving)setDeleteTarget(null);}else if(signatureForm&&!saving)setSignatureForm(null);else if(compose&&!sending&&!saving)closeDraft();else if(help)setHelp(false);else {setMenu('');setMobileRead(false)}return}const editable=(e.target instanceof HTMLElement ? e.target : document.body).closest('input,textarea,select,[contenteditable="true"]');
   if(e.metaKey&&!e.ctrlKey&&!e.altKey){
    const letter=e.key.toLowerCase();
    if(letter==='r'&&e.shiftKey){
@@ -584,20 +606,26 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     refreshCurrentView();
     return;
    }
-   if(!e.shiftKey&&!editable&&!compose&&!preview&&!livePreview&&!help&&!signatureForm&&currentRow&&['r','f'].includes(letter)){
+   if(!e.shiftKey&&!editable&&!compose&&!preview&&!livePreview&&!deleteTarget&&!help&&!signatureForm&&currentRow&&['r','f'].includes(letter)){
     e.preventDefault();
     start(letter==='r'?'Reply':'Forward',currentRow);
    }
    return;
   }
-  if((e.target instanceof HTMLElement ? e.target : document.body).matches('input,textarea,select,button')||e.metaKey||e.ctrlKey||e.altKey||compose||preview||livePreview||help||signatureForm)return;
+  if((e.target instanceof HTMLElement ? e.target : document.body).matches('input,textarea,select,button')||e.metaKey||e.ctrlKey||e.altKey||compose||preview||livePreview||deleteTarget||help||signatureForm)return;
  if(e.key==='c'){e.preventDefault();start()}if(e.key==='/'){e.preventDefault();document.getElementById('search')?.focus()}if(e.key==='?')setHelp(true);if(e.key==='e'&&currentRow)move([currentRow.id],'Archive');
  }document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key)});
  const tag=(m:Message)=><span className={'tag '+tones[m.category]}>{tags[m.category]}</span>;
  const project=projects.find(p=>p.id===currentRow?.project);
+ function renderDraftFile(key:string,name:string,open:()=>void,remove:()=>void) {
+  return <span className="draft-attachment" key={key}>
+   <button type="button" onClick={open} aria-label={'Preview '+name}><FileText size={15}/><span>{name}</span></button>
+   <button type="button" onClick={remove} disabled={saving||sending} aria-label={'Remove '+name}><X size={15}/></button>
+  </span>;
+ }
  function renderAttachments(messages:Message[]) {
   const cards=messages.flatMap(message=>liveToken
-   ? (message.attachments||[]).map(file=>({key:message.id+':'+file.part,name:file.name,message,open:()=>setLivePreview({id:message.id,file})}))
+   ? (message.attachments||[]).map(file=>({key:message.id+':'+file.part,name:file.name,message,open:()=>setLivePreview({kind:'mail',id:message.id,part:file.part,name:file.name,hosted})}))
    : message.files.map((name,index)=>({key:message.id+':'+index,name,message,open:()=>setPreview(name)})));
   if (!cards.length) return null;
   return <section className="attachments thread-attachments"><h3><Paperclip size={15}/> Attachments <span>{cards.length}</span></h3>
@@ -686,12 +714,20 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  {nav==='Drafts'&&!query?draftList.length?draftList.map(d=><button className="draft-row" key={d.id} disabled={saving} onClick={()=>reopenDraft(d.id)}><span className="tag rose">Draft</span><b>{d.subject||'(No subject)'}</b><span>{d.to||'No recipient'}</span></button>):<div className="empty">{draftSyncError||'No drafts yet.'}{draftSyncError&&<button className="project-tag" onClick={()=>void syncPreferences()}>Retry</button>}</div>:list.length?list.slice(0,limit).map((m,i)=><div key={m.id} className={'mail-row '+(m.id===currentRow?.id?'selected ':'')+(m.unread?'unread':'')}>
  <div className="row-side"><input type="checkbox" disabled={!!liveToken} aria-label={'Select '+m.subject} checked={marked.includes(m.id)} onChange={e=>setMarked(e.target.checked?[...marked,m.id]:marked.filter(x=>x!==m.id))}/><button className={'star '+(m.star?'starred':'')} disabled={!!liveToken&&m.id.startsWith('out-')} title={m.star?'Remove star':'Star message'} onClick={()=>change([m.id],{star:!m.star})}><Star size={14}/></button></div>
  <button className="row-content" onClick={()=>open(m)}><div className="row-top"><span className={'avatar mini '+avatarColors[i%5]}>{initials(m.name)}</span><b>{m.folder==='Sent'?'To: '+m.to:m.name}</b><MessageTimestamp value={m.date}/></div><strong>{m.subject}</strong><p>{m.body.replace(/\s+/g,' ')}</p><div className="row-foot">{tag(m)}{m.folder!=='Inbox'&&<span className="tag gray">{m.folder}</span>}{m.files.length>0&&<span className="paper-count"><Paperclip size={13}/>{m.files.length}</span>}{m.unread&&<i className="unread-dot"/>}</div></button>
- {m.folder!=='Trash'&&(!liveToken||!m.id.startsWith('out-'))&&<button type="button" className="icon row-delete" title="Move to Trash" aria-label={'Move to Trash: '+m.subject} onClick={()=>void move([m.id],'Trash')}><Trash2 size={16}/></button>}
+ {(!liveToken||!m.id.startsWith('out-'))&&<div className="row-mail-actions">
+  <button type="button" className="icon" title={m.unread?'Mark as read':'Mark as unread'}
+   aria-label={(m.unread?'Mark as read: ':'Mark as unread: ')+m.subject}
+   onClick={()=>void change([m.id],{unread:!m.unread})}>{m.unread?<MailOpen size={16}/>:<Mail size={16}/>}</button>
+  {m.folder==='Trash'?<button type="button" className="icon" title="Delete forever"
+   aria-label={'Delete forever: '+m.subject} onClick={()=>setDeleteTarget(m)}><Trash2 size={16}/></button>:
+   <button type="button" className="icon" title="Move to Trash"
+    aria-label={'Move to Trash: '+m.subject} onClick={()=>void move([m.id],'Trash')}><Trash2 size={16}/></button>}
+ </div>}
  </div>):<div className="empty">No messages match this view.</div>}
  {list.length>limit&&<button className="load" onClick={()=>setLimit(limit+60)}>Load more messages</button>}</div>
  <footer className="list-footer">{nav==='Drafts'&&!query?draftList.length+' drafts':list.length+' messages'} <span>•</span> {liveToken?connection:'Local sandbox'}</footer>
  </section>
- <section className="reader">{currentRow?<><div className="reader-tools"><button className="icon back" title="Back to messages" onClick={()=>setMobileRead(false)}><ChevronLeft size={19}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Archive" onClick={()=>move([currentRow.id],'Archive')}><Archive size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Trash" onClick={()=>move([currentRow.id],'Trash')}><Trash2 size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.unread?'Mark read':'Mark unread'} onClick={()=>change([currentRow.id],{unread:!currentRow.unread})}>{currentRow.unread?<MailOpen size={18}/>:<Mail size={18}/>}</button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Move message" onClick={()=>setMenu(menu==='move'?'':'move')}><MoreHorizontal size={20}/></button>{currentRow.folder!=='Inbox'&&currentRow.folder!=='Sent'&&<button className="icon" title="Restore message" onClick={()=>move([currentRow.id],currentRow.previousFolder==='Sent'?'Sent':'Inbox')}><RotateCcw size={17}/></button>}{menu==='move'&&<div className="popover move">{['Inbox','Archive','Trash','Spam'].map(f=><button key={f} onClick={()=>move([currentRow.id],f)}>Move to {f}</button>)}</div>}<span className="tool-space"/><span className="position">{list.findIndex(m=>m.id===currentRow.id)+1} of {list.length}</span><button className="icon next" title="Previous message" disabled={list[0]===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)-1];if(p)open(p)}}><ChevronLeft size={18}/></button><button className="icon next next-right" title="Next message" disabled={list.at(-1)===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)+1];if(p)open(p)}}><ChevronLeft size={18}/></button></div>
+ <section className="reader">{currentRow?<><div className="reader-tools"><button className="icon back" title="Back to messages" onClick={()=>setMobileRead(false)}><ChevronLeft size={19}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Archive" onClick={()=>move([currentRow.id],'Archive')}><Archive size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.folder==='Trash'?'Delete forever':'Move to Trash'} onClick={()=>currentRow.folder==='Trash'?setDeleteTarget(currentRow):void move([currentRow.id],'Trash')}><Trash2 size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.unread?'Mark read':'Mark unread'} onClick={()=>change([currentRow.id],{unread:!currentRow.unread})}>{currentRow.unread?<MailOpen size={18}/>:<Mail size={18}/>}</button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Move message" onClick={()=>setMenu(menu==='move'?'':'move')}><MoreHorizontal size={20}/></button>{currentRow.folder!=='Inbox'&&currentRow.folder!=='Sent'&&<button className="icon" title="Restore message" onClick={()=>move([currentRow.id],currentRow.previousFolder==='Sent'?'Sent':'Inbox')}><RotateCcw size={17}/></button>}{menu==='move'&&<div className="popover move">{['Inbox','Sent','Archive','Trash','Spam'].filter(f=>f!==currentRow.folder).map(f=><button key={f} onClick={()=>move([currentRow.id],f)}>Move to {f}</button>)}</div>}<span className="tool-space"/><span className="position">{list.findIndex(m=>m.id===currentRow.id)+1} of {list.length}</span><button className="icon next" title="Previous message" disabled={list[0]===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)-1];if(p)open(p)}}><ChevronLeft size={18}/></button><button className="icon next next-right" title="Next message" disabled={list.at(-1)===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)+1];if(p)open(p)}}><ChevronLeft size={18}/></button></div>
  <div className="reader-scroll"><div className="reader-content"><div className="subject-line"><h2>{currentRow.subject}</h2><button className={'star '+(currentRow.star?'starred':'')} disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Toggle message star" onClick={()=>change([currentRow.id],{star:!currentRow.star})}><Star size={20}/></button></div><div className="reader-tags">{tag(currentRow)}{project&&<button className="project-tag" onClick={()=>{go('Active Projects');setProjectFilter(project.id)}}><FolderKanban size={13}/>{project.name}</button>}</div>
  <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}{currentRow.folder==='Sent'&&currentRow.bcc&&' · Bcc: '+currentRow.bcc}</small></div><MessageTimestamp value={currentRow.date}/></div>
  {renderAttachments([currentRow,...newest.slice().reverse()])}
@@ -712,10 +748,23 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  {draft&&<div className="modal-back compose-overlay" onClick={closeDraft}><form ref={composeWindow.panel} style={composeWindow.position||undefined} className={"compose-panel"+(composeWindow.position?" compose-positioned":"")} role="dialog" aria-label="Compose message" aria-modal="true"
  onDragOver={event=>{if(event.dataTransfer.types.includes('Files')){event.preventDefault();event.dataTransfer.dropEffect=saving||sending?'none':'copy';setDraggingFiles(!saving&&!sending)}}}
  onDragLeave={event=>{if(!(event.relatedTarget instanceof Node)||!event.currentTarget.contains(event.relatedTarget))setDraggingFiles(false)}}
- onDrop={event=>{if(!event.dataTransfer.types.includes('Files'))return;event.preventDefault();setDraggingFiles(false);attachFiles(Array.from(event.dataTransfer.files))}} onClick={e=>e.stopPropagation()} onSubmit={sendDraft}><header className="compose-titlebar" onPointerDown={composeWindow.begin} onPointerMove={composeWindow.move} onPointerUp={composeWindow.end} onLostPointerCapture={composeWindow.end} onDoubleClick={event=>{if(!(event.target as HTMLElement).closest("button"))composeWindow.reset()}}><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending||saving} onClick={closeDraft}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts} lookup={contactLookup?lookupContacts:undefined}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><RecipientInput label="Bcc" value={draft.bcc||''} onChange={bcc=>edit({bcc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label><textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}{draft.includeSignature!==false&&state.signatureImages?.[draft.identity]&&<img className="signature-logo" alt="Signature" src={state.signatureImages[draft.identity]}/>}</div><button type="button" className="project-tag" disabled={sending||saving} onClick={openSignatures}>Edit signature</button></div>{draft.files.length>0&&<div className="chips">{draft.files.map((f,i)=><button type="button" key={i} onClick={()=>edit({files:draft.files.filter((_,j)=>j!==i)})}>{f} ×</button>)}</div>}{draft.largeFiles?.length?<div className="chips">{draft.largeFiles.map(file=><button type="button" key={file.id} disabled={saving||sending} onClick={()=>edit({largeFiles:draft.largeFiles?.filter(item=>item.id!==file.id)})}>{file.name} · Download link ×</button>)}</div>:null}
- {draft.forwardedAttachments?.length?<div className="chips">{draft.forwardedAttachments.map(file=><button type="button" key={file.messageId+file.part} disabled={saving||sending} onClick={()=>edit({forwardedAttachments:draft.forwardedAttachments?.filter(item=>item!==file)})}>{file.name} ×</button>)}</div>:null}
- {draft.stagedAttachments?.length?<div className="chips">{draft.stagedAttachments.map(file=><button type="button" key={file.id} disabled={saving||sending} onClick={()=>edit({stagedAttachments:draft.stagedAttachments?.filter(item=>item.id!==file.id)})}>{file.name} ×</button>)}</div>:null}
- {draft.attachments?.length?<div className="chips">{draft.attachments.map((file,index)=><button type="button" key={index} disabled={saving||sending} onClick={()=>edit({attachments:draft.attachments?.filter((_,i)=>i!==index)})}>{file.name} ×</button>)}</div>:null}
+ onDrop={event=>{if(!event.dataTransfer.types.includes('Files'))return;event.preventDefault();setDraggingFiles(false);attachFiles(Array.from(event.dataTransfer.files))}} onClick={e=>e.stopPropagation()} onSubmit={sendDraft}><header className="compose-titlebar" onPointerDown={composeWindow.begin} onPointerMove={composeWindow.move} onPointerUp={composeWindow.end} onLostPointerCapture={composeWindow.end} onDoubleClick={event=>{if(!(event.target as HTMLElement).closest("button"))composeWindow.reset()}}><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending||saving} onClick={closeDraft}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts} lookup={contactLookup?lookupContacts:undefined}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><RecipientInput label="Bcc" value={draft.bcc||''} onChange={bcc=>edit({bcc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label><textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}{draft.includeSignature!==false&&state.signatureImages?.[draft.identity]&&<img className="signature-logo" alt="Signature" src={state.signatureImages[draft.identity]}/>}</div><button type="button" className="project-tag" disabled={sending||saving} onClick={openSignatures}>Edit signature</button></div>
+ {draft.files.length>0||draft.largeFiles?.length||draft.forwardedAttachments?.length||draft.stagedAttachments?.length||draft.attachments?.length?
+  <div className="chips draft-attachment-list" aria-label="Draft attachments">
+   {draft.files.map((name,index)=>renderDraftFile('sample:'+index,name,()=>setPreview(name),()=>edit({files:draft.files.filter((_,i)=>i!==index)})))}
+   {draft.largeFiles?.map(file=>renderDraftFile('large:'+file.id,file.name+' · Download link',
+    ()=>setLivePreview({kind:'large',draftId:draft.id,file,name:file.name}),
+    ()=>edit({largeFiles:draft.largeFiles?.filter(item=>item.id!==file.id)})))}
+   {draft.forwardedAttachments?.map(file=>renderDraftFile(file.messageId+':'+file.part,file.name,
+    ()=>setLivePreview({kind:'mail',id:file.messageId,part:file.part,name:file.name,hosted}),
+    ()=>edit({forwardedAttachments:draft.forwardedAttachments?.filter(item=>item!==file)})))}
+   {draft.stagedAttachments?.map(file=>renderDraftFile('staged:'+file.id,file.name,
+    ()=>setLivePreview({kind:'staged',draftId:draft.id,file,name:file.name}),
+    ()=>edit({stagedAttachments:draft.stagedAttachments?.filter(item=>item.id!==file.id)})))}
+   {draft.attachments?.map((file,index)=>renderDraftFile('inline:'+index,file.name,
+    ()=>setLivePreview({kind:'inline',name:file.name,data:file.data}),
+    ()=>edit({attachments:draft.attachments?.filter((_,i)=>i!==index)})))}
+  </div>:null}
  <footer>
   {draggingFiles&&<span className="upload-progress" role="status">Drop files to attach them</span>}
   {uploadProgress&&<span className="upload-progress" role="status">{uploadProgress}{largeUploadAbort.current&&<button className="project-tag upload-cancel" type="button" onClick={()=>largeUploadAbort.current?.abort()}>Cancel upload</button>}</span>}
@@ -740,7 +789,20 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    <button type="submit" className="send" disabled={saving}>{saving?'Saving…':'Save signature'}</button>
   </div>
  </form></div>}
- {livePreview&&<AttachmentPreview key={livePreview.id+livePreview.file.part} id={livePreview.id} file={livePreview.file} hosted={hosted} request={liveRequest} close={()=>setLivePreview(null)}/>}
+ {deleteTarget&&<div className="modal-back centered" onClick={()=>{if(!saving)setDeleteTarget(null)}}>
+  <section className="signature-settings delete-confirmation" role="alertdialog" aria-modal="true"
+   aria-labelledby="delete-forever-heading" aria-describedby="delete-forever-description" onClick={event=>event.stopPropagation()}>
+   <header><b id="delete-forever-heading">Delete forever?</b></header>
+   <div className="signature-fields">
+    <p id="delete-forever-description">“{deleteTarget.subject}” will be permanently removed from this mailbox.</p>
+    <div className="delete-confirmation-actions">
+     <button type="button" className="project-tag" autoFocus disabled={saving} onClick={()=>setDeleteTarget(null)}>Cancel</button>
+     <button type="button" className="send" disabled={saving} onClick={()=>void deleteForever(deleteTarget)}>Delete forever</button>
+    </div>
+   </div>
+  </section>
+ </div>}
+ {livePreview&&<AttachmentPreview source={livePreview} request={liveRequest} close={()=>setLivePreview(null)}/>}
  {preview&&<div className="modal-back centered" onClick={()=>setPreview(null)}><section className="attachment-preview" role="dialog" aria-label="Attachment preview" onClick={e=>e.stopPropagation()}><header><b>{preview}</b><button className="icon" title="Close preview" onClick={()=>setPreview(null)}><X size={19}/></button></header><div className="preview-sheet"><div className="eyebrow">A2Z CONSTRUCTION SERVICES / DEMO DOCUMENT</div><FileText size={42}/><h2>{preview.replace(/\.pdf$/i,'')}</h2><p>This is a simulated attachment for the sandbox.</p></div><footer><a href="/samples/demo.pdf" download={preview}><Download size={16}/> Download sample PDF</a></footer></section></div>}
  {help&&<div className="modal-back centered" onClick={()=>setHelp(false)}><section className="shortcuts" role="dialog" aria-label="Keyboard shortcuts" onClick={e=>e.stopPropagation()}><header><b>Keyboard shortcuts</b><button className="icon" title="Close shortcuts" onClick={()=>setHelp(false)}><X size={19}/></button></header>{[['C','Compose'],['/','Search'],['⌘R','Reply'],['⌘⇧R','Refresh mailbox'],['⌘F','Forward'],['E','Archive selected message'],['Esc','Close dialog or message'],['?','Show shortcuts']].map(([k,l])=><p key={k}><kbd>{k}</kbd> {l}</p>)}</section></div>}
  {toast&&<div className="toast" role="status"><Check size={17}/>{toast}</div>}

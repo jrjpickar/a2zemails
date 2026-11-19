@@ -92,13 +92,13 @@ export function largeFileLinks(env,email,dependencies={}) {
    const file=largeFileRefs([input?.file])[0];
    await client.send(new AbortMultipartUploadCommand({...locator(input.draftId,file),UploadId:uploadIdentifier(input.uploadId)}));
   },
-  async links(draft,input) {
+  async links(draft,input,{expiresIn=7*86400}={}) {
    const files=largeFileRefs(input);
    return Promise.all(files.map(async file=>{
     const object=locator(draft,file);
     const head=await client.send(new HeadObjectCommand(object));
     if (head.ContentLength!==file.size) throw new TypeError('A large file is missing or incomplete. Attach it again.');
-    const url=await sign(client,new GetObjectCommand({...object,ResponseContentDisposition:downloadDisposition(file.name)}),{expiresIn:7*86400});
+    const url=await sign(client,new GetObjectCommand({...object,ResponseContentDisposition:downloadDisposition(file.name)}),{expiresIn});
     return {name:file.name,url};
    }));
   },

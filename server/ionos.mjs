@@ -15,7 +15,9 @@ const folderAliases = new Map([
  ['inbox','Inbox'], ['sent','Sent'], ['sent items','Sent'], ['archive','Archive'],
  ['trash','Trash'], ['deleted items','Trash'], ['spam','Spam'], ['junk','Spam'],
 ]);
-const folderName = entry => standardFolders.get(entry.specialUse) || folderAliases.get(entry.path.toLowerCase()) || entry.path;
+const retainedTrash = 'A2Z Trash';
+const isRetainedTrash = entry => entry.path.toLowerCase() === retainedTrash.toLowerCase();
+const folderName = entry => isRetainedTrash(entry) ? 'Trash' : standardFolders.get(entry.specialUse) || folderAliases.get(entry.path.toLowerCase()) || entry.path;
 const isMailFolder = entry => !entry.flags.has('\\Noselect') && entry.specialUse !== '\\Drafts' && !/(?:^|[./])drafts$/i.test(entry.path);
 
 export function ionosConfig(env) {
@@ -136,7 +138,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   finally {imap.close();}
  }
  let fetching;
- async function readMail() {
+ async function readMail(includeTrash) {
   const imap = new Imap(config.imap);
   imap.on?.('error',()=>{});
   const mail = [];
@@ -144,7 +146,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   let previewBudget = 3_000_000;
   try {
    await imap.connect();
-   const folders = (await imap.list()).filter(isMailFolder);
+   const folders = (await imap.list()).filter(entry=>isMailFolder(entry)&&(includeTrash||folderName(entry)!=='Trash'));
    const priority = entry => entry.path.toUpperCase()==='INBOX'?0:entry.specialUse==='\\Sent'?1:2;
    folders.sort((a,b)=>priority(a)-priority(b));
    for (const entry of folders) {
@@ -154,9 +156,9 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
      const {exists,uidValidity} = imap.mailbox;
      if (!exists) continue;
      const count = folder === 'Inbox' ? 75 : 25;
-     const range = Math.max(1,exists-count+1)+':'+exists;
+     const range = (folder==='Trash'?1:Math.max(1,exists-count+1))+':'+exists;
      const metadata = await imap.fetchAll(range,{uid:true,envelope:true,internalDate:true,flags:true,size:true,bodyStructure:true});
-     const eligible = metadata.slice().reverse().filter(item=>{
+     const eligible = metadata.slice(-count).reverse().filter(item=>{
       if (item.flags.has('\\Deleted') || item.size>768000 || item.size>previewBudget) return false;
       previewBudget -= item.size;
       return true;
@@ -231,8 +233,9 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
  }
 
  const mailbox = {
-  mail() {
-   if (!fetching) fetching = readMail().finally(()=>{fetching=undefined});
+  mail({includeTrash=true}={}) {
+   if (!includeTrash) return readMail(false);
+   if (!fetching) fetching = readMail(true).finally(()=>{fetching=undefined});
    return fetching;
   },
   folders() {
@@ -331,7 +334,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
      }
      if (html&&includeHtml&&includeImages) {
       const requested = new Set([...html.matchAll(/\bcid:([^"'<>\s]+)/gi)].map(match=>{
-       try {return decodeURIComponent(match[1]).toLowerCase();} catch {return match[1].toLowerCase();}
+       try {return decodeURIComponent(match[1]).replace(/^<|>$/g,'').toLowerCase();} catch {return match[1].toLowerCase();}
       }));
       let remaining=imageBudget;
       const candidates=relatedImages(message.bodyStructure).filter(image=>requested.has(image.cid)).slice(0,12);
@@ -340,7 +343,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
        if (image.size>remaining*1.5) continue;
        try {
         const result=await readPart(imap,uid,image.part,remaining);
-        if (!result || result.truncated || !result.raw.length) continue;
+        if (!result || result.truncated || safeRasterType(result.raw)!==image.type) continue;
         images[image.cid]='data:'+image.type+';base64,'+result.raw.toString('base64');
         remaining-=result.raw.length;
        } catch { /* A missing inline image should not hide the message. */ }
@@ -377,20 +380,41 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    const patches = {read:'\\Seen',unread:'\\Seen',star:'\\Flagged',unstar:'\\Flagged'};
    const flag = Object.hasOwn(patches,input?.action) ? patches[input.action] : '';
    const destination = ['Inbox','Sent','Archive','Trash','Spam'].includes(input?.destination) ? input.destination : '';
-   if (!match || (!flag && !(input.action==='move' && destination))) throw new TypeError('Invalid mailbox action.');
+   const permanent = input?.action==='delete-forever';
+   if (!match || (!permanent && !flag && !(input.action==='move' && destination))) throw new TypeError('Invalid mailbox action.');
    const [,path,generation,uid] = match;
    const imap = new Imap(config.imap);
    imap.on?.('error',()=>{});
    try {
     await imap.connect();
     const folders = await imap.list();
-    const target = destination && folders.find(entry=>!entry.flags.has('\\Noselect') &&
-     folderName(entry)===destination);
+    const source = folders.find(entry=>entry.path===path && !entry.flags.has('\\Noselect'));
+    if (permanent && (!source || folderName(source)!=='Trash')) {
+     return {error:'Move the message to Trash before deleting it forever.'};
+    }
+    if (permanent && !imap.capabilities.has('UIDPLUS')) {
+     return {error:'This mail server cannot safely delete a single message forever.'};
+    }
+    let target;
+    if (destination==='Trash') {
+     if (source && folderName(source)==='Trash') return {ok:true};
+     target=folders.find(entry=>isRetainedTrash(entry)&&!entry.flags.has('\\Noselect'));
+     if (!target) {
+      try { await imap.mailboxCreate(retainedTrash); } catch {
+       // A concurrent move may already have created the folder.
+      }
+      target=(await imap.list()).find(entry=>isRetainedTrash(entry)&&!entry.flags.has('\\Noselect'));
+     }
+    } else if (destination) {
+     target=folders.find(entry=>!entry.flags.has('\\Noselect') && folderName(entry)===destination);
+    }
     if (destination && !target) return {error:'That folder is unavailable in IONOS.'};
     const lock = await imap.getMailboxLock(path);
     try {
      if (String(imap.mailbox.uidValidity)!==generation) return {error:'The mailbox changed. Refresh and try again.'};
-     if (target) {
+     if (permanent) {
+      if (!await imap.messageDelete(uid,{uid:true})) return {error:'The message could not be deleted. Refresh the mailbox and try again.'};
+     } else if (target) {
       if (target.path!==path && !await imap.messageMove(uid,target.path,{uid:true})) {
        return {error:'The message could not be moved. Refresh the mailbox and try again.'};
       }
