@@ -14,6 +14,18 @@ test('construction categories favor subject and honor explicit domain correction
  assert.equal(classify('RFP — demo'),'Bid Invitations');
  assert.equal(classify('RFI','', 'gc@example.test',{'example.test':'Estimating'}),'Estimating');
 });
+test('bid invitations and demolition estimates keep their category in replies',()=>{
+ assert.equal(classify('Bid Invitation - Hollister - Brea Mall','Please confirm your intent to bid.'),'Bid Invitations');
+ assert.equal(classify('RE: Bid Invitation - Hollister - Brea Mall','Thank you.'),'Bid Invitations');
+ assert.equal(classify('RE: Demo bid- Hollister Brea','Thank you, Jesse.\n\n-----Original Message-----\nPlease see the invoice.'),'Estimating');
+ assert.equal(classify('Re: Demo Bid - FedEx #0313','Does this include demolition of the vault?'),'Estimating');
+ assert.equal(classify('RE: Demo Bid - Hollister - Torrance','Thank you.'),'Estimating');
+});
+test('body classification uses the current message and ignores quoted history',()=>{
+ assert.equal(classify('Project follow-up','Please confirm your intent to bid.\n\nOn Monday, Alex wrote:\n> Invoice attached.'),'Bid Invitations');
+ assert.equal(classify('Project follow-up','Thanks.\n\nFrom: Alex <alex@example.test>\nSent: Monday\nSubject: Invoice\nInvoice attached.'),'General');
+ assert.equal(classify('Project update','Payment has been issued.\n> Please confirm your intent to bid.'),'Invoices');
+});
 test('one project match is required',()=>{
  assert.equal(matchProject('See EST-241 and 1400 Harbor Blvd'),'P-241');
  assert.equal(matchProject('Harbor Point and Westfield'),'');

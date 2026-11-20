@@ -61,6 +61,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  const configFor = ({email,password}) => ionosConfig({
   A2Z_MODE:'live', A2Z_ENABLE_LIVE:'true', IONOS_EMAIL:email, IONOS_PASSWORD:password,
   IONOS_SMTP_PORT:env.IONOS_SMTP_PORT,
+  GROQ_API_KEY:env.GROQ_API_KEY,
  });
  return async function handler(request) {
   const url = new URL(request.url);

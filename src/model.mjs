@@ -5,16 +5,21 @@ export const projects = [
  {id:'P-275', name:'Civic Center Annex', gc:'Meridian Group', aliases:['Civic Center','310 Main Street','EST-275']}
 ];
 export const categories = ['Bid Invitations','Estimating','RFIs & Change Orders','Dispatch','Invoices','General'];
+export function currentMessageText(body) {
+ return body.split(/^\s*(?:-{2,}\s*(?:original|forwarded) message\s*-*|begin forwarded message:|on .+ wrote:|from:[^\n]+\n(?:\s*\n)?\s*(?:sent|date):)/im,1)[0]
+  .replace(/^\s*>.*$/gm,'');
+}
 export function classify(subject, body='', sender='', rules={}) {
  const domain=sender.toLowerCase().split('@')[1];
  if(domain && Object.hasOwn(rules,domain) && categories.includes(rules[domain])) return rules[domain];
- for(const content of [subject,body]){
+ for(const content of [subject,currentMessageText(body)]){
  const s=content.toLowerCase();
- if(/\b(itb|rfp|invitation to bid|request for proposal)\b/.test(s)) return categories[0];
+ if(/\b(itb|rfp|bid invitations?|invitation to bid|request for (?:bids?|proposals?)|intent to bid|invit(?:e|ed|ing)\b[^.!?\n]{0,50}\bto bid)\b/.test(s)) return categories[0];
  if(/\b(rfi|request for information|change order|co[- #]?\d+)\b/.test(s)) return categories[2];
+ if(/\b((?:demo(?:lition)?|revised|updated) bids?|bid (?:revision|scope|clarification|submission))\b/.test(s)) return categories[1];
  if(/\b(invoice|payment|purchase order|po[- #]?\d+|receipt)\b/.test(s)) return categories[4];
  if(/\b(dispatch|schedule update|notice to proceed|ntp|crew)\b/.test(s)) return categories[3];
- if(/\b(addend(?:um|a)|estimate|proposal|bid revision)\b/.test(s)) return categories[1];
+ if(/\b(addend(?:um|a)|estimates?|proposals?)\b/.test(s)) return categories[1];
  }
  return 'General';
 }

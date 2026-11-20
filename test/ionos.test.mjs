@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createIonosMailbox, ionosConfig } from '../server/ionos.mjs';
+import { groqCategories } from '../server/groq-classification.mjs';
 import { appendSignature, dashboardQueues, seed } from '../src/model.mjs';
 
 const env = {
@@ -59,6 +60,23 @@ test('IONOS adapter reads a message and sends a signed reply using the authentic
  assert.equal(mail[0].due,'2026-12-03');
  assert.equal(options.auth.user,env.IONOS_EMAIL);
 
+ const enhanced = createIonosMailbox(ionosConfig({...env,GROQ_API_KEY:' fixture-groq-key '}),{
+  Imap:FakeImap,transport:()=>({}),
+  fetchGroq:async (url,{headers,body})=>{
+   assert.equal(url,'https://api.groq.com/openai/v1/chat/completions');
+   assert.equal(headers.Authorization,'Bearer fixture-groq-key');
+   const request=JSON.parse(body);
+   assert.equal(request.response_format.json_schema.strict,true);
+   assert.deepEqual(JSON.parse(request.messages[1].content),[
+    {index:0,subject:'Invitation to bid',excerpt:'Bid due: 2026-12-03'},
+   ]);
+   return groqReply([{index:0,category:'Estimating'}]);
+  },
+ });
+ const {mail:reclassified}=await enhanced.mail();
+ assert.equal(reclassified[0].category,'Estimating');
+ assert.equal(reclassified[0].due,undefined);
+
  const body = appendSignature('We intend to bid.','A2Z Operations\nEstimating');
  const result = await adapter.send({
   id:'out-12345678-1234-1234-1234-123456789012',to:'gc@builder.example',cc:'',
@@ -72,6 +90,40 @@ test('IONOS adapter reads a message and sends a signed reply using the authentic
  assert.equal(outgoing.attachments[0].content.toString(),'test plan');
  assert.equal(result.messageId,outgoing.messageId);
  assert.equal(appendSignature('Reply','  '),'Reply');
+});
+
+function groqReply(results) {
+ return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({results})}}]});
+}
+
+test('Groq batches fall back on uncertainty, failures and ambiguous output',async ()=>{
+ const mail=[
+  {id:'a',folder:'Inbox',subject:'Demo Bid',body:'Scope attached.\n\n-----Original Message-----\nOld invoice'},
+  {id:'b',folder:'Inbox',subject:'Project Message',body:'Hello'},
+  {id:'c',folder:'Spam',subject:'Do not send',body:'Spam'},
+ ];
+ const email='groq-test@example.test';
+ const key='fixture-only';
+ assert.equal((await groqCategories(mail,email,undefined,()=>assert.fail('Groq is disabled'))).size,0);
+ assert.equal((await groqCategories(mail,email,key,async()=>new Response(null,{status:429}))).size,0);
+ assert.equal((await groqCategories(mail,email,key,async()=>groqReply([
+  {index:0,category:'Invoices'},{index:0,category:'Estimating'},
+ ]))).size,0);
+ const classify=async (_url,{body})=>{
+  assert.deepEqual(JSON.parse(JSON.parse(body).messages[1].content),[
+   {index:0,subject:'Demo Bid',excerpt:'Scope attached.'},
+   {index:1,subject:'Project Message',excerpt:'Hello'},
+  ]);
+  return groqReply([{index:1,category:'Uncertain'},{index:0,category:'Estimating'}]);
+ };
+ assert.deepEqual([...await groqCategories(mail,email,key,classify)],[['a','Estimating']]);
+ const requests=[];
+ const refreshed=await groqCategories(mail,email,key,async (_url,{body})=>{
+  requests.push(...JSON.parse(JSON.parse(body).messages[1].content));
+  return groqReply([{index:0,category:'General'}]);
+ });
+ assert.deepEqual(requests.map(message=>message.subject),['Project Message']);
+ assert.deepEqual([...refreshed],[['a','Estimating'],['b','General']]);
 });
 
 test('Command Center sorts deadlines and returns to awaiting reply after a new inbound message', () => {

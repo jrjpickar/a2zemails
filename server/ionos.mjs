@@ -4,6 +4,7 @@ import nodemailer from 'nodemailer';
 import { safeRasterType,signatureImage } from './signature-image.mjs';
 import { MAX_STAGED_BYTES } from './staged-attachments.mjs';
 import { mailAttachments } from './mail-attachments.mjs';
+import { groqCategories } from './groq-classification.mjs';
 import { classify,matchProject } from '../src/model.mjs';
 
 const mailboxAddress = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/u;
@@ -34,6 +35,7 @@ export function ionosConfig(env) {
  const auth = {user:email, pass};
  return {
   email,
+  groqKey:env.GROQ_API_KEY?.trim(),
   imap:{host:env.IONOS_IMAP_HOST||'imap.ionos.com',port:Number(env.IONOS_IMAP_PORT||993),secure:true,auth,logger:false,connectionTimeout:12000,greetingTimeout:12000,socketTimeout:30000},
   smtp:{host:env.IONOS_SMTP_HOST||'smtp.ionos.com',port:smtpPort,secure:smtpPort===465,requireTLS:smtpPort===587,auth,connectionTimeout:12000,greetingTimeout:12000,socketTimeout:30000},
  };
@@ -121,7 +123,7 @@ async function readPart(imap,uid,part,limit,chunkSize) {
  return {raw:Buffer.concat(chunks).subarray(0,limit),truncated:size>limit};
 }
 
-export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, transport=nodemailer.createTransport}={}) {
+export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, transport=nodemailer.createTransport,fetchGroq}={}) {
  const smtp = transport(config.smtp);
  async function saveSent(message) {
   const imap = new Imap(config.imap);
@@ -143,10 +145,11 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   imap.on?.('error',()=>{});
   const mail = [];
   const contacts = new Map();
+  let folders;
   let previewBudget = 3_000_000;
   try {
    await imap.connect();
-   const folders = (await imap.list()).filter(entry=>isMailFolder(entry)&&(includeTrash||folderName(entry)!=='Trash'));
+   folders = (await imap.list()).filter(entry=>isMailFolder(entry)&&(includeTrash||folderName(entry)!=='Trash'));
    const priority = entry => entry.path.toUpperCase()==='INBOX'?0:entry.specialUse==='\\Sent'?1:2;
    folders.sort((a,b)=>priority(a)-priority(b));
    for (const entry of folders) {
@@ -199,8 +202,15 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
      }
     } finally { lock.release(); }
    }
-   return {email:config.email,folders:[...new Set(folders.map(folderName))],contacts:[...contacts.values()],mail:mail.sort((a,b)=>b.date.localeCompare(a.date))};
   } finally { imap.close(); }
+  const labels = await groqCategories(mail,config.email,config.groqKey,fetchGroq);
+  for (const row of mail) {
+   const category = labels.get(row.id);
+   if (!category || category===row.category) continue;
+   row.category = category;
+   row.due = category==='Bid Invitations' ? bidDue(row.subject,row.body) : undefined;
+  }
+  return {email:config.email,folders:[...new Set(folders.map(folderName))],contacts:[...contacts.values()],mail:mail.sort((a,b)=>b.date.localeCompare(a.date))};
  }
 
  async function readConnection(operation) {

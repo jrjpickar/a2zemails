@@ -31,6 +31,12 @@ Recipient suggestions in To and Cc come from sender and recipient addresses foun
 
 Import the repository and use the checked-in Netlify settings, `pnpm build`, publish `dist`, and load functions from `netlify/functions`. Run `netlify dev` with the Netlify CLI to exercise `GET /.netlify/functions/sandbox?q=...`. That endpoint only exposes synthetic read-only fixtures. The browser keeps its own sandbox state and does not write to the endpoint. No hosted deployment was performed.
 
+### Optional Groq inbox classification
+
+Set `GROQ_API_KEY` in Netlify under **Production → Functions** and redeploy, or set it in the server's local `.env` for local IONOS. Use a Groq API key with access to `openai/gpt-oss-120b`. Keep it in server environment settings.
+
+On live mailbox load and refresh, the server asks Groq to classify the recent Inbox messages. Groq receives subjects and preview excerpts of up to 1,200 characters with common quoted history removed. The request omits attachment data, mailbox credentials and address fields. Recent results are cached in memory. If the model abstains, the request fails or times out, or the key is absent, the built-in rules supply the category.
+
 ### Enable live IONOS on Netlify
 
 On the standalone sign-in page, select **Remember me** to keep an IONOS session for up to seven days in that browser. Signing out clears the saved session.
