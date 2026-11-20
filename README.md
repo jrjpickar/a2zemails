@@ -37,6 +37,12 @@ Set `GROQ_API_KEY` in Netlify under **Production → Functions** and redeploy, o
 
 On live mailbox load and refresh, the server asks Groq to classify the recent Inbox messages. Groq receives subjects and preview excerpts of up to 1,200 characters with common quoted history removed. The request omits attachment data, mailbox credentials and address fields. Recent results are cached in memory. If the model abstains, the request fails or times out, or the key is absent, the built-in rules supply the category.
 
+### Ask AI and Contact Temperature
+
+Set `GEMINI_API_KEY` in Netlify **Production → Functions**, or in the server's local `.env`. **Ask AI** appears on open emails when either AI key is configured. On submit, the server sends the question, selected subject, and up to 12,000 characters of plain text to Gemini and uses `GROQ_API_KEY` as fallback. [Google AI Studio API keys](https://aistudio.google.com/apikey)
+
+Set `GHL_TEMPERATURE_FIELD_ID` to the HighLevel **Contact** custom field ID for Temperature. Reuse `GHL_CONTACTS_PIT_TOKEN` with `contacts.readonly` and `GHL_CONTACTS_LOCATION_ID` (or a single configured `GHL_LOCATION_IDS` value). On refresh, the Cold, Warm, Hot, and VIP folders filter recent Inbox mail by the sender's matching primary email in that location, without moving messages in IONOS. The field values are matched case-insensitively. [HighLevel Search Contacts](https://marketplace.gohighlevel.com/docs/ghl/contacts/search-contacts-advanced/index.html)
+
 ### Enable live IONOS on Netlify
 
 On the standalone sign-in page, select **Remember me** to keep an IONOS session for up to seven days in that browser. Signing out clears the saved session.

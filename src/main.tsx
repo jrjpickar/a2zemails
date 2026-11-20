@@ -8,11 +8,14 @@ import {uploadLargeFile,type LargeFile} from './large-upload';
 import {AttachmentPreview,type AttachmentSource,type MailAttachment,type ForwardedAttachment} from './attachment-preview';
 import {useComposePosition} from './compose-position';
 import {MessageText} from './message-text';
+import {AskAi} from './ask-ai';
 import {RecipientInput,type Contact} from './recipient-input';
 import {rememberedSession,hostedRequest,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
 import './style.css';
 import './theme.css';
-type Message={id:string;thread:string;name:string;company:string;subject:string;date:string;body:string;sentSignatureImage?:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
+const temperatures=[['cold','Cold'],['warm','Warm'],['hot','Hot'],['vip','VIP']] as const;
+type Temperature=typeof temperatures[number][0];
+type Message={id:string;temperature?:Temperature;thread:string;name:string;company:string;subject:string;date:string;body:string;sentSignatureImage?:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
 type Upload={name:string;data:string;size?:number};
 type StagedUpload={id:string;name:string;size:number};
 type SavedDraft={id:string;to:string;subject:string;updatedAt:string};
@@ -93,6 +96,7 @@ const initials=(name:string)=>name.split(' ').slice(0,2).map(s=>s[0]).join('');
 const avatarColors=['sand','lavender','sage','peach','sky'];
 function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveToken?:string;onSignOut?:(error?:unknown)=>Promise<void>;largeUploads?:boolean;contactLookup?:boolean}){
  const [knownContacts,setKnownContacts]=useState<Contact[]>([]);
+ const [mailFeatures,setMailFeatures]=useState({askAi:false,temperatureFolders:false,temperatureUnavailable:false});
  const lookupContacts=React.useCallback(async(query:string,signal:AbortSignal):Promise<Contact[]>=>{
   const result=await hostedRequest('contacts',{query},liveToken,signal);
   return result.contacts||[];
@@ -157,9 +161,10 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  async function fetchMailbox(revision:number) {
   setConnection('Connecting to IONOS…');
   try {
-   const data: {email:string;mail:Message[];contacts:Contact[];folders?:string[]} = await liveRequest('mail');
+   const data: {email:string;mail:Message[];contacts:Contact[];folders?:string[];askAi?:boolean;temperatureFolders?:boolean;temperatureUnavailable?:boolean} = await liveRequest('mail');
    if (revision!==mailboxRevision.current) return;
    setKnownContacts(data.contacts||[]);
+   setMailFeatures({askAi:!!data.askAi,temperatureFolders:!!data.temperatureFolders,temperatureUnavailable:!!data.temperatureUnavailable});
    setAccount(data.email);
    setMailFolders((data.folders||[]).filter(folder=>!groups[1].links.some(([name])=>name===folder))
     .sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'})));
@@ -258,8 +263,11 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  useEffect(()=>{if(liveToken)return;try{localStorage.setItem(storageKey,JSON.stringify(state))}catch{setToast('Browser storage is full. Changes are available until you reload.')}},[state]);
  useEffect(()=>{if(!toast)return;let id=setTimeout(()=>setToast(''),3200);return()=>clearTimeout(id)},[toast]);
  const customFolderPrefix='folder:';
- const viewName=nav.startsWith(customFolderPrefix)?nav.slice(customFolderPrefix.length):nav;
+ const temperaturePrefix='temperature:';
+ const temperatureName=temperatures.find(([value])=>nav===temperaturePrefix+value)?.[1];
+ const viewName=temperatureName||(nav.startsWith(customFolderPrefix)?nav.slice(customFolderPrefix.length):nav);
  function inFolder(message:Message, folder:string) {
+  if (folder.startsWith(temperaturePrefix)) return message.folder==='Inbox'&&message.temperature===folder.slice(temperaturePrefix.length);
   if (folder.startsWith(customFolderPrefix)) return message.folder===folder.slice(customFolderPrefix.length);
   if (folder==='Active Projects') return Boolean(message.project)&&!['Trash','Spam'].includes(message.folder);
   if (categories.includes(folder)) return message.category===folder&&!['Trash','Spam'].includes(message.folder);
@@ -674,6 +682,11 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <div className="brand"><div className="mark">A<span>2</span>Z</div><div><strong>A2Z Construction</strong><small>OPERATIONS MAIL</small></div></div>
  <button className="compose" disabled={!!liveToken&&!account} onClick={()=>start()}><Plus size={19}/> Compose <kbd>C</kbd></button>
  <div className="nav">{groups.map(g=><section key={g.label}><h2>{g.label}</h2>{g.links.map(([label,Icon])=><button key={label} className={nav===label&&!query?'active':''} onClick={()=>go(label)}><Icon size={16}/><span>{label}</span>{label!=='Drafts'&&label!=='Command Center'&&label!=='Trash'&&label!=='Spam'&&unreadCounts[label]>0&&<b>{unreadCounts[label]}</b>}{label==='Drafts'&&draftList.length>0&&<b>{draftList.length}</b>}</button>)}</section>)}
+ {mailFeatures.temperatureFolders&&<section><h2>CONTACT TEMPERATURE</h2>{mailFeatures.temperatureUnavailable&&<small className="temperature-unavailable" role="status">HighLevel unavailable. Refresh to retry.</small>}{temperatures.map(([value,label])=>{
+  const key=temperaturePrefix+value;
+  const count=inbox.filter(message=>message.temperature===value&&message.unread).length;
+  return <button key={key} className={nav===key&&!query?'active':''} onClick={()=>go(key)}><FolderKanban size={16}/><span>{label}</span>{count>0&&<b>{count}</b>}</button>;
+ })}</section>}
  {mailFolders.length>0&&<section><h2>FOLDERS</h2>{mailFolders.map(folder=>{
   const key=customFolderPrefix+folder;
   const count=mail.filter(message=>message.folder===folder&&message.unread).length;
@@ -730,6 +743,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <section className="reader">{currentRow?<><div className="reader-tools"><button className="icon back" title="Back to messages" onClick={()=>setMobileRead(false)}><ChevronLeft size={19}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Archive" onClick={()=>move([currentRow.id],'Archive')}><Archive size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.folder==='Trash'?'Delete forever':'Move to Trash'} onClick={()=>currentRow.folder==='Trash'?setDeleteTarget(currentRow):void move([currentRow.id],'Trash')}><Trash2 size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.unread?'Mark read':'Mark unread'} onClick={()=>change([currentRow.id],{unread:!currentRow.unread})}>{currentRow.unread?<MailOpen size={18}/>:<Mail size={18}/>}</button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Move message" onClick={()=>setMenu(menu==='move'?'':'move')}><MoreHorizontal size={20}/></button>{currentRow.folder!=='Inbox'&&currentRow.folder!=='Sent'&&<button className="icon" title="Restore message" onClick={()=>move([currentRow.id],currentRow.previousFolder==='Sent'?'Sent':'Inbox')}><RotateCcw size={17}/></button>}{menu==='move'&&<div className="popover move">{['Inbox','Sent','Archive','Trash','Spam'].filter(f=>f!==currentRow.folder).map(f=><button key={f} onClick={()=>move([currentRow.id],f)}>Move to {f}</button>)}</div>}<span className="tool-space"/><span className="position">{list.findIndex(m=>m.id===currentRow.id)+1} of {list.length}</span><button className="icon next" title="Previous message" disabled={list[0]===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)-1];if(p)open(p)}}><ChevronLeft size={18}/></button><button className="icon next next-right" title="Next message" disabled={list.at(-1)===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)+1];if(p)open(p)}}><ChevronLeft size={18}/></button></div>
  <div className="reader-scroll"><div className="reader-content"><div className="subject-line"><h2>{currentRow.subject}</h2><button className={'star '+(currentRow.star?'starred':'')} disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Toggle message star" onClick={()=>change([currentRow.id],{star:!currentRow.star})}><Star size={20}/></button></div><div className="reader-tags">{tag(currentRow)}{project&&<button className="project-tag" onClick={()=>{go('Active Projects');setProjectFilter(project.id)}}><FolderKanban size={13}/>{project.name}</button>}</div>
  <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}{currentRow.folder==='Sent'&&currentRow.bcc&&' · Bcc: '+currentRow.bcc}</small></div><MessageTimestamp value={currentRow.date}/></div>
+ {mailFeatures.askAi&&!currentRow.id.startsWith('out-')&&<AskAi key={currentRow.id} ask={question=>liveRequest('ask-ai',{id:currentRow.id,question})}/>}
  {renderAttachments([currentRow,...newest.slice().reverse()])}
  {currentRow.due&&<div className="deadline"><div className="deadline-icon"><Clock3 size={19}/></div><div><b>Bid submission deadline</b><span>{day(currentRow.due+'T12:00:00')}</span></div><span className="tag gold">Open bid</span></div>}
  {renderBody(currentRow)}

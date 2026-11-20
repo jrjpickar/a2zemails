@@ -3,6 +3,8 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { REQUEST_LIMIT } from './mail-attachments.mjs';
 import { createIonosMailbox, ionosConfig } from './ionos.mjs';
+import { aiConfig,aiEnabled,askEmail } from './ask-ai.mjs';
+import { mailboxTemperatures,temperatureConfig } from './ghl-contacts.mjs';
 
 const host = '127.0.0.1:4174';
 const origin = 'http://'+host;
@@ -11,6 +13,8 @@ const html = await readFile(new URL('../dist/index.html',import.meta.url),'utf8'
  throw new Error('Build the app with pnpm build before starting the local IONOS server.');
 });
 const mailbox = createIonosMailbox(ionosConfig(process.env));
+const ai = aiConfig(process.env);
+const temperature = temperatureConfig(process.env);
 const deliveries = new Map();
 const types = {js:'text/javascript; charset=utf-8',css:'text/css; charset=utf-8'};
 const json = (res,code,data) => {
@@ -46,7 +50,14 @@ const server = createServer(async(req,res)=>{
  try {
   if (path.startsWith('/api/ionos/')) {
    if (!authorized(req)) return json(res,403,{error:'Reload the local IONOS app to start a session.'});
-   if (path==='/api/ionos/mail' && req.method==='GET') return json(res,200,await mailbox.mail());
+   if (path==='/api/ionos/mail' && req.method==='GET') {
+    const data=await mailboxTemperatures(await mailbox.mail(),temperature);
+    return json(res,200,{...data,askAi:aiEnabled(ai)});
+   }
+   if (path==='/api/ionos/ask-ai' && req.method==='POST' && req.headers['content-type']==='application/json') {
+    const {status,data}=await askEmail(ai,mailbox,await readJson(req,16000));
+    return json(res,status,data);
+   }
    if (path==='/api/ionos/body' && req.method==='POST' && req.headers['content-type']==='application/json') {
     const input = await readJson(req);
     const result = await mailbox.body(input?.id);

@@ -1,4 +1,5 @@
-import {contactsConfig,searchContacts} from '../../server/ghl-contacts.mjs';
+import {contactsConfig,searchContacts,mailboxTemperatures,temperatureConfig} from '../../server/ghl-contacts.mjs';
+import {aiConfig,aiEnabled,askEmail} from '../../server/ask-ai.mjs';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { stagedAttachments, stagedFiles, CHUNK_BYTES, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
 import { largeFileLinks,largeFileRefs,largeFilesEnabled } from '../../server/large-file-links.mjs';
@@ -57,6 +58,8 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  const highLevelSetup = ready ? createHighLevelLogin(env,allowed) : null;
  const highLevel=highLevelSetup?.login;
  const contacts=ready?contactsConfig(env):null;
+ const temperature=temperatureConfig(env,contacts);
+ const ai=aiConfig(env);
  const key = ready ? createHash('sha256').update(env.SESSION_SECRET).digest() : null;
  const configFor = ({email,password}) => ionosConfig({
   A2Z_MODE:'live', A2Z_ENABLE_LIVE:'true', IONOS_EMAIL:email, IONOS_PASSWORD:password,
@@ -168,7 +171,15 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     return reply({ok:true});
    }
    const mailbox = mailboxFactory(configFor(login));
-   if (action==='mail' && request.method==='GET') return reply(await mailbox.mail());
+   if (action==='mail' && request.method==='GET') {
+    const canReadTemperature=temperature&&(!session.highLevel||session.highLevel.activeLocation===temperature.locationId);
+    const data=await mailboxTemperatures(await mailbox.mail(),canReadTemperature?temperature:null);
+    return reply({...data,askAi:aiEnabled(ai)});
+   }
+   if (action==='ask-ai' && request.method==='POST') {
+    const {status,data}=await askEmail(ai,mailbox,await readInput(request,16000));
+    return reply(data,status);
+   }
    if (action==='body' && request.method==='POST') {
     const input = await readInput(request,8192);
     const result = await mailbox.body(input?.id);

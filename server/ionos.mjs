@@ -307,7 +307,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     return {name:'message-'+uid+'.eml',type:'message/rfc822',content:result.raw};
    });
   },
-  async body(id,{includeHtml=true,includeImages=true}={}) {
+  async body(id,{includeHtml=true,includeImages=true,includeSubject=false}={}) {
    const match = messageLocation(id);
    if (!match) throw new TypeError('Invalid message.');
    const [,path,generation,uid] = match;
@@ -318,7 +318,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     const lock = await imap.getMailboxLock(path,{readOnly:true});
     try {
      if (String(imap.mailbox.uidValidity)!==generation) return null;
-     const message = await imap.fetchOne(uid,{bodyStructure:true},{uid:true});
+     const message = await imap.fetchOne(uid,{bodyStructure:true,...(includeSubject?{envelope:true}:{})},{uid:true});
      if (!message) return null;
      if (!message.bodyStructure) throw new Error('IONOS did not return a message structure.');
      const parts = textParts(message.bodyStructure).sort((a,b)=>Number(a.type==='text/html')-Number(b.type==='text/html'));
@@ -359,7 +359,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
        } catch { /* A missing inline image should not hide the message. */ }
       }
      }
-     return {body,truncated,...(html&&includeHtml?{html,...(includeImages?{images}:{})}:{})};
+     return {body,truncated,...(includeSubject?{subject:message.envelope?.subject||''}:{}),...(html&&includeHtml?{html,...(includeImages?{images}:{})}:{})};
     } finally {lock.release();}
    } finally {imap.close();}
   },
