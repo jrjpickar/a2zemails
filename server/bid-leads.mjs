@@ -12,6 +12,21 @@ const enums={
 };
 const switches=['is_addendum_or_reminder','is_bid_results','contact_locked'];
 const flags=['prevailing_wage','DIR','certified_payroll','public_works_bond','DVBE/SBE'];
+const nullable=type=>({anyOf:[{type},{type:'null'}]});
+const inviteProperties={
+ ...Object.fromEntries(fields.map(field=>[field,nullable('string')])),
+ ...Object.fromEntries(switches.map(field=>[field,{type:'boolean'}])),
+ ...Object.fromEntries(Object.entries(enums).map(([field,values])=>[field,
+  values.includes(null)?{anyOf:[{type:'string',enum:values.filter(Boolean)},{type:'null'}]}:{type:'string',enum:values}])),
+ size_sf:nullable('number'),
+ public_work_flags:{type:'array',items:{type:'string',enum:flags}},
+};
+const inviteSchema={
+ type:'object',additionalProperties:false,required:['invites'],
+ properties:{invites:{type:'array',items:{
+  type:'object',additionalProperties:false,required:Object.keys(inviteProperties),properties:inviteProperties,
+ }}},
+};
 const expectedSize=fields.length+switches.length+Object.keys(enums).length+2;
 const defaultTerms=['invitation to bid','invitation bid','bid invitation','bid invite','invite to bid','itb','rfq','rfp','bid request','request for bid','request for proposal','demo','demolition'];
 const defaultDomains=['buildingconnected.com','planhub.com','procore.com','smartbidnet.com','smartbid.co','constructconnect.com'];
@@ -223,8 +238,8 @@ export const bidReportStore=()=>getStore({name:'bid-lead-reports',consistency:'s
 export async function readBidReport(email,store=bidReportStore()) {
  const state=await store.get(keyFor(email)+'/report',{type:'json'});
  if (!state?.summary) return null;
- const {complete,runDate,asOf,totalMessages,pipelines,dedupeScope,counts,providers,reasons,skipped,review}=state.summary;
- return {complete,runDate,asOf,totalMessages,pipelines,dedupeScope,counts,providers,reasons,skipped,review:review||[]};
+ const {complete,runDate,asOf,totalMessages,pipelines,dedupeScope,counts,providers,reasons,skipped,review,retryable}=state.summary;
+ return {complete,runDate,asOf,totalMessages,pipelines,dedupeScope,counts,providers,reasons,skipped,review:review||[],retryable:retryable||0};
 }
 
 const offsetFormatter=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Los_Angeles',year:'numeric',month:'2-digit',day:'2-digit'});
@@ -241,8 +256,8 @@ export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(
  const key=keyFor(email)+'/report';
  const loaded=await store.getWithMetadata(key,{type:'json'});
  const existing=loaded?.data;
- if (existing?.complete&&!fresh) return existing.summary;
- const state=existing?.complete?null:existing;
+ if (existing?.complete&&!fresh&&!existing.summary.retryable) return existing.summary;
+ const state=existing?.complete&&fresh?null:existing;
  const started=Date.now();
  const runDate=state?.runDate||now.toISOString();
  const runNow=new Date(runDate);
@@ -260,6 +275,7 @@ export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(
  const previous=state?.generation===expectedGeneration?state.processed||{}:{};
  const processed=Object.fromEntries(messages.filter(message=>previous[message.id]&&(!fast||previous[message.id].candidate)).map(message=>[message.id,previous[message.id]]));
  const geocoded=new Map();
+ const cooldowns=new Map();
  const origin=config.geoKey?await coordinates('Costa Mesa, CA 92626',config.geoKey,fetcher):null;
  if (config.geoKey&&!origin) throw new Error('geocode_origin_unavailable');
 
@@ -335,7 +351,7 @@ export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(
     if (lead.status==='skipped') reasons[lead.reason]=(reasons[lead.reason]||0)+1;
    }
   }
-  return {complete,runDate,asOf:new Date().toISOString(),totalMessages:filtered+messages.length,
+  return {complete,runDate,asOf:new Date().toISOString(),totalMessages:filtered+messages.length,retryable:records.filter(record=>record.retryable).length,
    pipelines:desk.pipelineCount,dedupeScope:config.scope,counts,providers,reasons,
    skipped:leads.filter(item=>item.status==='skipped').reverse().slice(0,100)
     .map(({uid,subject,reason})=>({uid,subject,reason})),
@@ -370,10 +386,10 @@ export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(
    const source=[message.subject,message.from,body.slice(0,30000)].join('\n');
    const aiStarted=performance.now();
    const result=await runAiChain(config.ai,[{role:'user',content:JSON.stringify({receivedDate:dayInCalifornia(new Date(message.date)),email:source})}],{
-    prompt:bidLeadPrompt,temp:0,json:true,validate:validateInvites,fetcher,
+    prompt:bidLeadPrompt,temp:0,json:true,schema:inviteSchema,validate:validateInvites,fetcher,bidScan:true,cooldowns,
    });
    console.info('[Bid extraction]',JSON.stringify({provider:result.provider||null,
-    fallbackReason:result.fallbackReason||result.reason||null,latencyMs:Math.round(performance.now()-aiStarted)}));
+    model:result.model||null,fallbackReason:result.fallbackReason||result.reason||null,latencyMs:Math.round(performance.now()-aiStarted)}));
    if (!result.provider) throw new Error(result.stop?'bid_lead_provider_configuration':'bid_lead_provider_unavailable');
    record.provider=result.provider;
    const entry={uid:message.uid,sourceMessageId:message.id,sender:(message.from||'').slice(0,320),subject:message.subject.slice(0,300)};
@@ -396,18 +412,31 @@ export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(
   }
   return record;
  }
- const waiting=messages.filter(message=>!processed[message.id]);
+ const waiting=messages.filter(message=>!processed[message.id]||processed[message.id].retryable);
  const parallel=fast?6:1;
+ let emptyWaves=0;
  for (let start=0;start<waiting.length;start+=parallel) {
   if (Date.now()-started>budgetMs) return checkpoint();
   const batch=waiting.slice(start,start+parallel);
   const outcomes=await Promise.allSettled(batch.map(review));
   for (const [index,outcome] of outcomes.entries()) {
-   if (outcome.status==='fulfilled') processed[batch[index].id]=outcome.value;
+   const message=batch[index];
+   if (outcome.status==='fulfilled') {
+    processed[message.id]=outcome.value;
+   } else if (outcome.reason?.message!=='bid_lead_provider_configuration') {
+    processed[message.id]={candidate:true,retryable:true,entries:[{
+     uid:message.uid,subject:message.subject.slice(0,300),status:'needs_review',
+     reason:outcome.reason?.message==='bid_lead_provider_unavailable'?'ai_review_unavailable':'message_read_failed',
+    }]};
+   }
   }
   if (start+parallel<waiting.length||outcomes.some(item=>item.status==='rejected')) await checkpoint();
-  const failure=outcomes.find(item=>item.status==='rejected');
-  if (failure) throw failure.reason;
+  if (outcomes.some(item=>item.status==='rejected'&&item.reason?.message==='bid_lead_provider_configuration')) {
+   throw new Error('bid_lead_provider_configuration');
+  }
+  const providerOutage=outcomes.every(item=>item.status==='rejected'&&item.reason?.message==='bid_lead_provider_unavailable');
+  emptyWaves=providerOutage?emptyWaves+1:0;
+  if (emptyWaves>=2&&start+parallel<waiting.length) throw new Error('bid_lead_provider_outage');
  }
  return checkpoint(true);
 }

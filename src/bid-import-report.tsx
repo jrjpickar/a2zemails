@@ -4,7 +4,7 @@ import {hostedRequest} from './hosted';
 import {QualifiedBids} from './qualified-bids';
 
 type Report={
- complete:boolean;asOf:string;totalMessages:number;counts:{messagesScanned:number;candidates:number;qualified:number;needsReview:number;skipped:number};
+ complete:boolean;retryable?:number;asOf:string;totalMessages:number;counts:{messagesScanned:number;candidates:number;qualified:number;needsReview:number;skipped:number};
  review?:{uid:number;subject:string;reason:string}[];reasons:Record<string,number>;skipped:{uid:number;subject:string;reason:string}[];
 };
 
@@ -12,7 +12,7 @@ type Activity={status:'running'|'complete'|'failed'|'paused';at:string;reason?:s
 const failures:Record<string,string>={
  bid_lead_credentials_missing:'Configure the HighLevel contact token and at least one AI provider.',
  bid_lead_provider_configuration:'Check the AI provider key and model access.',
- bid_lead_provider_unavailable:'AI providers could not complete the last candidate. Resume to retry it.',
+ bid_lead_provider_outage:'The AI providers failed on consecutive groups of emails. Progress is saved. Resume to try again.',
  highlevel_http_401:'HighLevel rejected the current PIT.',
  highlevel_http_403:'Check the HighLevel PIT read scopes.',
  geocode_origin_unavailable:'The distance service could not resolve the Costa Mesa starting point.',
@@ -25,6 +25,7 @@ const descriptions:Record<string,string>={
  out_of_radius:'More than 30 miles away',no_bid_invite:'No bid invite found',
  owner_unverified:'Private owner could not be verified',gc_missing:'GC missing',size_unknown:'Commercial TI size missing',
  distance_unverified:'Distance could not be verified',message_unavailable:'Message was unavailable on IONOS',
+ ai_review_unavailable:'AI review could not finish. Retry this item.',message_read_failed:'Message read failed. Retry this item.',
 };
 const reasonLabel=(reason:string)=>descriptions[reason]||reason.replaceAll('_',' ');
 
@@ -71,7 +72,7 @@ export function BidImportReport({token}:{token:string}) {
   setStarting(true);setScan('');
   try {
    const requested=Date.now();
-   await hostedRequest('bid-scan',{fresh:report?.complete===true},token);
+   await hostedRequest('bid-scan',{fresh:report?.complete===true&&!report.retryable},token);
    setQueuedAt(requested);
    setScan('Scan queued. This report updates automatically.');
   } catch(error) {setScan(error instanceof Error?error.message:'The scan could not be queued.');}
@@ -87,7 +88,7 @@ export function BidImportReport({token}:{token:string}) {
   <div className="bid-scan-actions">
    <button className="send bid-action bid-action-primary" type="button" disabled={starting||pending||watching} onClick={()=>void runScan()}>
     <Search size={16} aria-hidden="true"/>
-    {watching?'Scan in progress':starting?'Starting scan…':report&&!report.complete?'Resume bid scan':'Find bid leads'}
+    {watching?'Scan in progress':starting?'Starting scan…':report&&!report.complete?'Resume bid scan':report?.retryable?'Retry AI reviews':'Find bid leads'}
    </button>
    <span>Last 30 days of Inbox mail</span>
   </div>
@@ -104,6 +105,7 @@ export function BidImportReport({token}:{token:string}) {
     value={Math.min(report.counts.messagesScanned,report.totalMessages)} max={report.totalMessages}/> }
    <p>{report.counts.candidates} candidates · {report.counts.qualified} qualified · {report.counts.needsReview} need review</p>
    {Object.entries(report.reasons).length>0&&<ul>{Object.entries(report.reasons).map(([reason,count])=><li key={reason}>{reasonLabel(reason)} ({count})</li>)}</ul>}
+   {!!report.retryable&&<p>{report.retryable} reviews can be retried. Completed results are kept.</p>}
    {!!report.review?.length&&<details><summary>Needs review ({report.review.length})</summary>
     <ul>{report.review.map((item,index)=><li key={item.uid+':'+index}><strong>{item.subject}</strong> · {reasonLabel(item.reason)}</li>)}</ul>
    </details>}

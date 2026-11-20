@@ -277,8 +277,16 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    return readFolder('INBOX',async imap=>{
     const generation=String(imap.mailbox.uidValidity);
     const base={since,deleted:false};
-    const keywords=[...new Set([...terms,'bid','pricing','estimate','quote','tender','addendum','selective demo','bid opportunity'])];
-    const alternatives=[...keywords.map(text=>({text})),...domains.map(from=>({from}))];
+    const broad=new Set(['bid','pricing','estimate','quote','demo','demolition']);
+    const keywords=[...new Set([...terms.filter(word=>!broad.has(word)),'pricing request','request for pricing',
+     'request for quotation','request for quote','submit your bid','bid due','bids due','proposals due','bid opportunity',
+     'project out to bid','invited to bid','invitation to tender','bid addendum','demo bid','demolition bid'])];
+    const trade=terms.filter(word=>word==='demo'||word==='demolition');
+    const alternatives=[...keywords.map(text=>({text})),...domains.map(from=>({from})),
+     ...trade.flatMap(text=>['subcontractor','bid package','pricing','bidding','scope of work'].map(value=>({
+      not:{or:[{not:{text}},{not:{text:value}}]},
+     })))];
+
     const all=await imap.search(base,{uid:true});
     if (all===false) throw new Error('IONOS bid date search failed.');
     const matching=await imap.search({...base,or:alternatives},{uid:true});

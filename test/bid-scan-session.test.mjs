@@ -69,3 +69,60 @@ test('Optimized intake gives all matching messages AI review in bounded parallel
  assert.equal(peak,6);
  assert.equal(stored.complete,true);
 });
+
+test('Bid extraction falls back across Groq models and cools down timed-out models',async ()=>{
+ const {runAiChain}=await import('../server/ask-ai.mjs');
+ const attempted=[];
+ const cooldowns=new Map();
+ const fetcher=async (url,options)=>{
+  const request=JSON.parse(options.body);
+  const model=url.includes('googleapis.com')?'Gemini':request.model;
+  attempted.push(model);
+  if (model!=='qwen/qwen3.8-27b') throw new DOMException('Fixture timeout','TimeoutError');
+  assert.equal(request.response_format.type,'json_schema');
+  return Response.json({choices:[{message:{content:'{"invites":[]}'}}]});
+ };
+ const settings={bidScan:true,cooldowns,fetcher,json:true,schema:{type:'object'},validate:JSON.parse};
+ const config={gemini:'fixture',groq:'fixture'};
+ const messages=[{role:'user',content:'Bid invite'}];
+ const first=await runAiChain(config,messages,settings);
+ assert.equal(first.model,'qwen/qwen3.8-27b');
+ assert.deepEqual(attempted,['Gemini','openai/gpt-oss-120b','openai/gpt-oss-20b','qwen/qwen3.8-27b']);
+ attempted.length=0;
+ assert.equal((await runAiChain(config,messages,settings)).provider,'Groq');
+ assert.deepEqual(attempted,['qwen/qwen3.8-27b']);
+});
+
+test('A failed candidate does not block other waves and retry touches only the failed email',async ()=>{
+ const {dryRunBidLeads}=await import('../server/bid-leads.mjs');
+ let state,etag=0,fail=true;
+ const opened=[];
+ const mail=Array.from({length:7},(_,i)=>({id:'INBOX:4:'+(i+1),uid:i+1,
+  date:'2026-11-18T18:00:00Z',subject:'Candidate fixture '+(i+1),from:'gc@example.test'}));
+ const options={
+  email:login.email,now:new Date('2026-11-20T18:00:00Z'),
+  config:{desk:{token:'fixture',locationId:'loc',projectNameId:'project'},ai:{gemini:'fixture'},terms:['bid invite'],domains:[],scope:'global'},
+  mailbox:{async recentBidInbox(){return {mail,total:862,matched:7,generation:'4'};},
+   async body(id){opened.push(id);return {body:id.endsWith(':7')?'This fixture fails':'Good invite'};}},
+  store:{async getWithMetadata(){return state?{data:state,etag:String(etag)}:null;},
+   async setJSON(_key,data){state=structuredClone(data);return {modified:true,etag:String(++etag)};}},
+  fetcher:async (url,{body})=>{
+   if (!url.includes('googleapis.com')) return Response.json(url.includes('/pipelines')?{pipelines:[{id:'main'}]}:{opportunities:[]});
+   const request=JSON.parse(body);
+   assert.ok(request.generationConfig.responseJsonSchema.properties.invites);
+   if (fail&&request.contents[0].parts[0].text.includes('This fixture fails')) return Response.json({});
+   return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:'{"invites":[]}'}]}}]});
+  },
+ };
+ const first=await dryRunBidLeads(options);
+ assert.equal(first.complete,true);
+ assert.equal(first.retryable,1);
+ assert.equal(first.providers.Gemini,6);
+ assert.equal(first.counts.messagesScanned,862);
+ assert.equal(opened.length,7);
+ fail=false;opened.length=0;
+ const second=await dryRunBidLeads(options);
+ assert.equal(second.retryable,0);
+ assert.deepEqual(opened,['INBOX:4:7']);
+ assert.equal(second.providers.Gemini,7);
+});

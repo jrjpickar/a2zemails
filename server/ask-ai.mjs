@@ -16,13 +16,13 @@ export function aiEnabled(config) {
 
 const providers = [
  {
-  key:'gemini',name:'Gemini',
+  key:'gemini',name:'Gemini',model:'gemini-3.8-flash',
   url:'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',
   headers:key=>({'x-goog-api-key':key}),
-  payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false})=>({
+  payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false,schema})=>({
    systemInstruction:{parts:[{text:prompt}]},
    contents:messages.map(({role,content})=>({role:role==='assistant'?'model':'user',parts:[{text:content}]})),
-   generationConfig:{temperature:temp,maxOutputTokens:maxTokens,...(json?{responseMimeType:"application/json"}:{})},
+   generationConfig:{temperature:temp,maxOutputTokens:maxTokens,...(json?{responseMimeType:"application/json",...(schema?{responseJsonSchema:schema}:{})}:{})},
   }),
   answer(data) {
    const candidate=data?.candidates?.[0];
@@ -35,12 +35,12 @@ const providers = [
   },
  },
  {
-  key:'groq',name:'Groq',
+  key:'groq',name:'Groq',model:'openai/gpt-oss-120b',
   url:'https://api.groq.com/openai/v1/chat/completions',
   headers:key=>({Authorization:'Bearer '+key}),
-  payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false})=>({
-   model:'openai/gpt-oss-120b',reasoning_effort:'low',temperature:temp,max_completion_tokens:maxTokens,
-   ...(json?{response_format:{type:'json_object'}}:{}),
+  payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false,schema,model:settingsModel})=>({
+   model:settingsModel||'openai/gpt-oss-120b',reasoning_effort:'low',temperature:temp,max_completion_tokens:maxTokens,
+   ...(json?{response_format:schema?{type:'json_schema',json_schema:{name:'bid_invites',strict:true,schema}}:{type:'json_object'}}:{}),
    messages:[{role:'system',content:prompt},...messages],
   }),
   answer(data) {
@@ -50,6 +50,13 @@ const providers = [
    return typeof text==='string' ? {text} : {reason:'malformed_response'};
   },
  },
+];
+
+const bidProviders=[
+ {...providers[0],timeout:11000},
+ {...providers[1],timeout:8500},
+ {...providers[1],model:'openai/gpt-oss-20b',timeout:7500,optional:true},
+ {...providers[1],model:'qwen/qwen3.8-27b',timeout:7500,optional:true},
 ];
 
 function cleanAnswer(text) {
@@ -62,14 +69,14 @@ async function attempt(provider,key,messages,signal,fetcher,settings) {
  try {
   response=await fetcher(provider.url,{
    method:'POST',headers:{'Content-Type':'application/json',...provider.headers(key)},
-   body:JSON.stringify(provider.payload(messages,settings)),signal,
+   body:JSON.stringify(provider.payload(messages,{...settings,model:provider.model})),signal,
   });
  } catch (error) {
   return {reason:signal.aborted||error?.name==='TimeoutError'?'timeout':'network_error'};
  }
  if (!response.ok) {
   const status=response.status;
-  return {reason:'http_'+status,retry:status===429||status>=500,stop:status>=400&&status<500&&status!==408&&status!==429};
+  return {reason:'http_'+status,retry:status===429||status>=500,stop:status>=400&&status<500&&status!==408&&status!==429&&!(provider.optional&&status===404)};
  }
  try {
   const result=provider.answer(await response.json());
@@ -87,25 +94,32 @@ async function attempt(provider,key,messages,signal,fetcher,settings) {
 
 async function runProvider(provider,key,messages,budget,fetcher,settings) {
  // A retry shares the provider's 15-second allocation, including backoff.
- const signal=AbortSignal.any([budget,AbortSignal.timeout(providerTimeout)]);
+ const signal=AbortSignal.any([budget,AbortSignal.timeout(provider.timeout||providerTimeout)]);
  const first=await attempt(provider,key,messages,signal,fetcher,settings);
  if (!first.retry||signal.aborted) return first;
  try {await delay(1000,undefined,{signal});} catch {return {reason:'timeout'};}
  return attempt(provider,key,messages,signal,fetcher,settings);
 }
 
-export async function runAiChain(config,messages,{budget=AbortSignal.timeout(totalTimeout),fetcher=fetch,attempts=[],...settings}={}) {
+export async function runAiChain(config,messages,{budget=AbortSignal.timeout(totalTimeout),fetcher=fetch,attempts=[],bidScan=false,cooldowns,...settings}={}) {
  let fallbackReason=null;
- for (const provider of providers) {
+ for (const provider of bidScan?bidProviders:providers) {
   const key=config[provider.key];
   if (!key) {
    fallbackReason??=provider.key+'_not_configured';
    continue;
   }
   if (budget.aborted) break;
+  if ((cooldowns?.get(provider.model)||0)>Date.now()) {
+   fallbackReason??='provider_cooling_down';
+   continue;
+  }
   const result=await runProvider(provider,key,messages,budget,fetcher,settings);
-  if (result.answer!==undefined) return {...result,provider:provider.name,fallbackReason};
-  attempts.push({provider:provider.name,reason:result.reason});
+  if (result.answer!==undefined) return {...result,provider:provider.name,model:provider.model,fallbackReason};
+  attempts.push({provider:provider.name,model:provider.model,reason:result.reason});
+  if (cooldowns&&(result.reason==='timeout'||result.reason==='http_429'||/^http_5/.test(result.reason))) {
+   cooldowns.set(provider.model,Date.now()+(result.reason==='http_429'?30000:10000));
+  }
   if (result.stop) return {...result,fallbackReason};
   fallbackReason??=result.reason;
  }
