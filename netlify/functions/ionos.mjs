@@ -1,5 +1,6 @@
+import {sealBidScan} from '../../server/bid-scan-session.mjs';
 import {bidImportSettings,bidPreview,bookQualifiedBid,currentQualifiedBids,inspectBidEmail,oneEmailBids,qualifiedBids,qualifiedBidCsv} from '../../server/bid-import.mjs';
-import {dayInCalifornia,readBidReport} from '../../server/bid-leads.mjs';
+import {dayInCalifornia,readBidReport,readBidScanActivity} from '../../server/bid-leads.mjs';
 import {contactsConfig,searchContacts,mailboxTemperatures,temperatureConfig} from '../../server/ghl-contacts.mjs';
 import {aiConfig,aiEnabled,askEmail} from '../../server/ask-ai.mjs';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
@@ -120,17 +121,20 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     reason:session?.highLevel?'ghl_mailbox':'session_expired',
    },401,usesCookie?sessionCookie('',0):undefined);
    if (usesCookie && action==='session' && request.method==='GET') return reply({email:login.email});
-   if (action==='bid-import-report' && request.method==='GET') return reply({report:await readBidReport(login.email)});
+   if (action==='bid-import-report' && request.method==='GET') {
+    const [report,activity]=await Promise.all([readBidReport(login.email),readBidScanActivity(login.email)]);
+    return reply({report,activity});
+   }
    if (action==='bid-scan' && request.method==='POST') {
-    if (login.email!==env.MCP_IONOS_EMAIL?.trim().toLowerCase()) return reply({error:'This mailbox is not configured for bid scanning.'},403);
-    const key=env.BID_DRY_RUN_TOKEN;
+    const key=env.BID_DRY_RUN_TOKEN?.trim();
     const site=env.URL;
     if (!site||!key||key.length<32) return reply({error:'Bid scanning is not configured on this deployment.'},503);
     const input=await readInput(request,256);
     const endpoint=new URL('/.netlify/functions/bid-dry-run-background',site);
     if (endpoint.protocol!=='https:') return reply({error:'Bid scanning needs the deployed HTTPS site URL.'},503);
-    if (input?.fresh===true) endpoint.searchParams.set('fresh','1');
-    const response=await fetch(endpoint,{method:'POST',headers:{Authorization:'Bearer '+key},signal:AbortSignal.timeout(5000)});
+    const ticket=sealBidScan(env.SESSION_SECRET,login,input?.fresh===true);
+    const response=await fetch(endpoint,{method:'POST',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
+     body:JSON.stringify({ticket}),signal:AbortSignal.timeout(5000)});
     return response.status===202||response.ok ? reply({accepted:true},202) :
      reply({error:'The bid scan could not be queued.'},502);
    }

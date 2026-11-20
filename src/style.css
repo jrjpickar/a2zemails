@@ -51,3 +51,21 @@
 .qualified-bid-pages{display:flex;align-items:center;gap:10px;padding:10px 16px;flex-wrap:wrap}
 .qualified-bids dialog dd{margin:0 0 8px;overflow-wrap:anywhere}
 .qualified-bids dialog dt{font-weight:700}
+
+.bid-import-report>header .project-tag{margin-left:auto}
+.bid-scan-actions{display:flex;align-items:center;gap:10px;padding:10px 16px;flex-wrap:wrap}
+.bid-scan-actions span{font-size:.85rem;color:var(--muted)}
+.bid-scan-progress{display:block;width:calc(100% - 32px);margin:6px 16px;accent-color:var(--accent)}
+.bid-import-report .bid-action,.qualified-bids .bid-action{
+ min-height:48px;padding:10px 16px;display:inline-flex;align-items:center;justify-content:center;gap:8px;
+ font-size:14px;font-weight:750;line-height:1.25;border:2px solid currentColor;border-radius:9px;
+ background:var(--raised);color:var(--ink);
+}
+.bid-import-report .bid-action-primary,.qualified-bids .bid-action-primary{
+ background:#8b2d12;color:#fff8f1;border-color:#8b2d12;
+}
+:root[data-theme="dark"] .bid-import-report .bid-action-primary,:root[data-theme="dark"] .qualified-bids .bid-action-primary{
+ background:#ffd39e;color:#311502;border-color:#ffd39e;
+}
+.bid-import-report .bid-action:focus-visible,.qualified-bids .bid-action:focus-visible{outline:3px solid var(--accent-text);outline-offset:2px}
+.bid-import-report .bid-action:disabled,.qualified-bids .bid-action:disabled{opacity:.6;cursor:default}

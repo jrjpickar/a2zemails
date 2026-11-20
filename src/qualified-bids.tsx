@@ -71,23 +71,23 @@ export function QualifiedBids({token,message,reportVersion=0}:{token:string;mess
  }
 
  return <section className={message?'qualified-bids':'queue qualified-bids'}>
-  {message?<button type="button" className="project-tag" onClick={()=>setOpen(value=>!value)} aria-expanded={open}>Add to Estimating Desk</button>:
-   <header><h2>Qualified bid leads</h2>{data?.complete&&<button type="button" className="project-tag" disabled={pending} onClick={()=>void exportCsv()}><Download size={15}/> Download CSV</button>}</header>}
+  {message?<button type="button" className="project-tag bid-action" onClick={()=>setOpen(value=>!value)} aria-expanded={open}>Add to Estimating Desk</button>:
+   <header><h2>Qualified bid leads</h2>{data?.complete&&<button type="button" className="project-tag bid-action bid-action-primary" disabled={pending} onClick={()=>void exportCsv()}><Download size={15}/> Download qualified CSV</button>}</header>}
   {open&&<>
    {!data&&!error&&<p role="status">Loading qualified leads…</p>}
-   {message&&<button type="button" className="project-tag" disabled={pending} onClick={()=>void inspect()}>{pending?'Working…':'Qualify this email'}</button>}
+   {message&&<button type="button" className="project-tag bid-action" disabled={pending} onClick={()=>void inspect()}>{pending?'Working…':'Qualify this email'}</button>}
    {inspection&&<p role="status">{inspection}</p>}
    {data&&!data.complete&&!message&&<p>Complete a bid scan from Command Center first.</p>}
    {data?.complete&&data.total===0&&<p>{message?'No qualified lead from this email is in the completed scan.':'No qualified leads in the completed scan.'}</p>}
    {data?.leads.map(lead=><div key={lead.id} className="qualified-bid-row">
     <div><strong>{lead.project}</strong><small>{lead.company} · {lead.address} · Due {lead.date}</small></div>
     {booked.has(lead.id)?<span role="status">Booking accepted</span>:data.bookingEnabled&&
-     <button type="button" className="project-tag" disabled={pending} onClick={()=>{setError('');setSelected(lead);dialog.current?.showModal();}}>Review and add</button>}
+     <button type="button" className="project-tag bid-action" disabled={pending} onClick={()=>{setError('');setSelected(lead);dialog.current?.showModal();}}>Review lead</button>}
    </div>)}
    {data?.complete&&data.total>25&&<div className="qualified-bid-pages">
-    <button type="button" className="project-tag" disabled={page===0} onClick={()=>setPage(value=>value-1)}>Previous</button>
+    <button type="button" className="project-tag bid-action" disabled={page===0} onClick={()=>setPage(value=>value-1)}>Previous</button>
     <span>Page {page+1} of {Math.ceil(data.total/25)}</span>
-    <button type="button" className="project-tag" disabled={(page+1)*25>=data.total} onClick={()=>setPage(value=>value+1)}>Next</button>
+    <button type="button" className="project-tag bid-action" disabled={(page+1)*25>=data.total} onClick={()=>setPage(value=>value+1)}>Next</button>
    </div>}
   </>}
   {error&&<p role="alert">{error}</p>}
@@ -100,8 +100,8 @@ export function QualifiedBids({token,message,reportVersion=0}:{token:string;mess
    </dl>}
    {error&&<p role="alert">{error}</p>}
    <div className="qualified-bid-pages">
-    <button type="button" className="project-tag" disabled={pending} onClick={()=>dialog.current?.close()}>Cancel</button>
-    <button type="button" className="send" disabled={pending} onClick={()=>void confirm()}>{pending?'Booking…':'Confirm and add'}</button>
+    <button type="button" className="project-tag bid-action" disabled={pending} onClick={()=>dialog.current?.close()}>Cancel</button>
+    <button type="button" className="send bid-action bid-action-primary" disabled={pending} onClick={()=>void confirm()}>{pending?'Booking…':'Add to Estimating Desk'}</button>
    </div>
   </dialog>
  </section>;

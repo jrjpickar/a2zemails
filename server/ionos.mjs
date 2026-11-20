@@ -273,6 +273,30 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    return readConnection(async imap=>(await imap.list()).filter(
     folder=>!folder.flags.has('\\Noselect')).map(folder=>({path:folder.path,role:folder.specialUse||null})));
   },
+  recentBidInbox(since,{terms,domains}) {
+   return readFolder('INBOX',async imap=>{
+    const generation=String(imap.mailbox.uidValidity);
+    const base={since,deleted:false};
+    const keywords=[...new Set([...terms,'bid','pricing','estimate','quote','tender','addendum','selective demo','bid opportunity'])];
+    const alternatives=[...keywords.map(text=>({text})),...domains.map(from=>({from}))];
+    const all=await imap.search(base,{uid:true});
+    if (all===false) throw new Error('IONOS bid date search failed.');
+    const matching=await imap.search({...base,or:alternatives},{uid:true});
+    if (matching===false) throw new Error('IONOS bid candidate search failed.');
+    const allowed=new Set(all);
+    const uids=matching.filter(uid=>allowed.has(uid)).sort((a,b)=>b-a);
+    const mail=[];
+    for (let start=0;start<uids.length;start+=100) {
+     const rows=await imap.fetchAll(uids.slice(start,start+100),{
+      uid:true,envelope:true,internalDate:true,flags:true,
+     },{uid:true});
+     for (const row of rows) {
+      if (row.internalDate>=since&&!row.flags?.has('\\Deleted')) mail.push(messageMetadata(row,'INBOX',generation));
+     }
+    }
+    return {mail,generation,matched:uids.length,total:all.length};
+   });
+  },
   recentInbox(since) {
    return readFolder('INBOX',async imap=>{
     const generation=String(imap.mailbox.uidValidity);

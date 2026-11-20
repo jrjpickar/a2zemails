@@ -13,7 +13,7 @@ const enums={
 const switches=['is_addendum_or_reminder','is_bid_results','contact_locked'];
 const flags=['prevailing_wage','DIR','certified_payroll','public_works_bond','DVBE/SBE'];
 const expectedSize=fields.length+switches.length+Object.keys(enums).length+2;
-const defaultTerms=['invitation to bid','itb','rfq','bid request','request for proposal','demo','demolition'];
+const defaultTerms=['invitation to bid','invitation bid','bid invitation','bid invite','invite to bid','itb','rfq','rfp','bid request','request for bid','request for proposal','demo','demolition'];
 const defaultDomains=['buildingconnected.com','planhub.com','procore.com','smartbidnet.com','smartbid.co','constructconnect.com'];
 const aliases={street:'st',avenue:'ave',boulevard:'blvd',drive:'dr',road:'rd',place:'pl',parkway:'pkwy'};
 const gh='https://services.leadconnectorhq.com';
@@ -77,17 +77,25 @@ export function validateInvites(answer) {
 const validDate=value=>/^\d{4}-\d{2}-\d{2}$/.test(value||'')&&!Number.isNaN(Date.parse(value))&&
  new Date(value).toISOString().slice(0,10)===value;
 
-function dateInText(date,source) {
+function dateInText(date,source,receivedAt) {
  if (!validDate(date)) return false;
  const [year,month,day]=date.split('-');
  const m=Number(month),d=Number(day);
  const monthName=new Intl.DateTimeFormat('en-US',{month:'long',timeZone:'UTC'}).format(new Date(date));
  const seasonal='(?:'+monthName+'|'+monthName.slice(0,3)+'\\.?)';
- return source.includes(date)||new RegExp('\\b(?:0?'+m+'[/-]0?'+d+'[/-](?:'+year+'|'+year.slice(2)+')|'+
-  seasonal+'\\s+0?'+d+'(?:st|nd|rd|th)?[,]?\\s+'+year+')\\b','i').test(source);
+ const named=seasonal+'\\s+0?'+d+'(?:st|nd|rd|th)?';
+ if (source.includes(date)||new RegExp('\\b(?:0?'+m+'[/-]0?'+d+'[/-](?:'+year+'|'+year.slice(2)+')|'+
+  named+'[,]?\\s+'+year+')\\b','i').test(source)) return true;
+ const received=new Date(receivedAt||'');
+ if (Number.isNaN(received.getTime())) return false;
+ const receivedDay=dayInCalifornia(received);
+ const delta=Date.parse(date)-Date.parse(receivedDay);
+ if (delta<0||delta>120*dayMs) return false;
+ // Accept an omitted year only where the email ties the named date to a bid deadline.
+ return new RegExp('(?:due|deadline|submit by)[^\\n.;]{0,55}\\b'+named+'\\b(?![,]?\\s+\\d{4}\\b)','i').test(source);
 }
 
-export function verifyEvidence(input,source) {
+export function verifyEvidence(input,source,receivedAt) {
  const item={...input};
  const flat=source.toLowerCase().replace(/\s+/g,' ');
  const phones=source.match(/(?:\+?1[ .-]?)?\(?[2-9]\d{2}\)?[ .-]?[2-9]\d{2}[ .-]?\d{4}(?!\d)/g)||[];
@@ -97,7 +105,7 @@ export function verifyEvidence(input,source) {
  const number=item.street?.match(/^\s*(\d+)\b/)?.[1];
  if (number&&!new RegExp('\\b'+number+'\\b').test(source)) item.street=null;
  if (item.size_sf!==null&&!new RegExp('(?<![\\d.])'+String(item.size_sf).replace('.','\\.')+'(?![\\d.])').test(source.replace(/,(?=\d{3}\b)/g,''))) item.size_sf=null;
- if (!dateInText(item.due_date,source)) item.due_date=null;
+ if (!dateInText(item.due_date,source,receivedAt)) item.due_date=null;
  if (!item.demo_scope_evidence||!flat.includes(item.demo_scope_evidence.toLowerCase().trim().replace(/\s+/g,' '))) item.demo_scope_evidence=null;
  for (const name of ['planhub_link','photos_link']) {
   try {
@@ -169,8 +177,13 @@ export async function readDesk(config,fetcher=fetch) {
 }
 
 function isCandidate(message,body,config) {
- const content=' '+normalize(message.subject+' '+body)+' ';
+ const subject=message.subject||'';
+ const content=' '+normalize(subject+' '+body)+' ';
  const domain=(message.from||'').toLowerCase().split('@').at(-1);
+ if (/(^|\.)linkedin\.com$/.test(domain)) return false;
+ // A reply carrying an actual scope, addendum or deadline still gets reviewed.
+ if (/^re\s*:/i.test(subject)&&/\b(?:demo|demolition)\s+bid\b/i.test(subject)&&
+     !/\b(?:scope|include[ds]?|addendum|due|deadline|invitation|submit|reminder|revis(?:ed|ion))\b/i.test(body)) return false;
  return config.terms.some(term=>content.includes(' '+normalize(term)+' '))||
   config.domains.some(value=>domain===value||domain.endsWith('.'+value));
 }
@@ -210,8 +223,8 @@ export const bidReportStore=()=>getStore({name:'bid-lead-reports',consistency:'s
 export async function readBidReport(email,store=bidReportStore()) {
  const state=await store.get(keyFor(email)+'/report',{type:'json'});
  if (!state?.summary) return null;
- const {complete,runDate,asOf,totalMessages,pipelines,dedupeScope,counts,providers,reasons,skipped}=state.summary;
- return {complete,runDate,asOf,totalMessages,pipelines,dedupeScope,counts,providers,reasons,skipped};
+ const {complete,runDate,asOf,totalMessages,pipelines,dedupeScope,counts,providers,reasons,skipped,review}=state.summary;
+ return {complete,runDate,asOf,totalMessages,pipelines,dedupeScope,counts,providers,reasons,skipped,review:review||[]};
 }
 
 const offsetFormatter=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Los_Angeles',year:'numeric',month:'2-digit',day:'2-digit'});
@@ -234,18 +247,25 @@ export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(
  const runDate=state?.runDate||now.toISOString();
  const runNow=new Date(runDate);
  const since=new Date(runNow.getTime()-30*dayMs);
- const [desk,mail]=await Promise.all([readDesk(config.desk,fetcher),mailbox.recentInbox(since)]);
- const messages=mail.filter(message=>message.date&&Date.parse(message.date)<=runNow.getTime());
- const expectedGeneration=messages[0]?.id.split(':')[1]||null;
- if (state&&state.generation!==expectedGeneration) throw new Error('bid_lead_mailbox_changed');
+ const fast=typeof mailbox.recentBidInbox==='function';
+ const [desk,intake]=await Promise.all([
+  readDesk(config.desk,fetcher),
+  fast?mailbox.recentBidInbox(since,config):mailbox.recentInbox(since).then(mail=>({mail})),
+ ]);
+ const messages=intake.mail.filter(message=>message.date&&Date.parse(message.date)<=runNow.getTime())
+  .sort((a,b)=>b.uid-a.uid);
+ const expectedGeneration=intake.generation||messages[0]?.id.split(':')[1]||null;
+ const filtered=fast?Math.max(0,intake.total-intake.matched):0;
  let etag=loaded?.etag;
- const processed=state?.processed||{};
+ const previous=state?.generation===expectedGeneration?state.processed||{}:{};
+ const processed=Object.fromEntries(messages.filter(message=>previous[message.id]&&(!fast||previous[message.id].candidate)).map(message=>[message.id,previous[message.id]]));
  const geocoded=new Map();
  const origin=config.geoKey?await coordinates('Costa Mesa, CA 92626',config.geoKey,fetcher):null;
  if (config.geoKey&&!origin) throw new Error('geocode_origin_unavailable');
 
  function summarize(complete) {
-  const records=Object.values(processed);
+  const records=Object.entries(processed).sort(([a],[b])=>Number(a.split(':').at(-1))-Number(b.split(':').at(-1)))
+   .map(([,record])=>record);
   const leads=[];
   const latest=new Map();
   const updates=[];
@@ -301,7 +321,7 @@ export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(
    companies.get(entry.project).add(entry.gc);
    leads.push(entry);
   }
-  const counts={messagesScanned:records.length,candidates:0,qualified:0,needsReview:0,skipped:0};
+  const counts={messagesScanned:filtered+records.length,candidates:0,qualified:0,needsReview:0,skipped:0};
   const providers={};
   for (const record of records) {
    if (record.candidate) counts.candidates++;
@@ -315,9 +335,11 @@ export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(
     if (lead.status==='skipped') reasons[lead.reason]=(reasons[lead.reason]||0)+1;
    }
   }
-  return {complete,runDate,asOf:new Date().toISOString(),totalMessages:messages.length,
+  return {complete,runDate,asOf:new Date().toISOString(),totalMessages:filtered+messages.length,
    pipelines:desk.pipelineCount,dedupeScope:config.scope,counts,providers,reasons,
    skipped:leads.filter(item=>item.status==='skipped').reverse().slice(0,100)
+    .map(({uid,subject,reason})=>({uid,subject,reason})),
+   review:leads.filter(item=>item.status==='needs_review').reverse().slice(0,100)
     .map(({uid,subject,reason})=>({uid,subject,reason})),
    leads:leads.filter(item=>item.lead&&item.status!=='skipped').map(item=>({
     ...item,multipleGcsBidding:(companies.get(item.project)?.size||0)>1,
@@ -337,17 +359,17 @@ export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(
  // Reserve the report before the first provider request. A conflicting writer
  // cannot overwrite a checkpoint, even when two background calls overlap.
  await checkpoint();
- for (const message of messages) {
-  if (processed[message.id]) continue;
-  if (Date.now()-started>budgetMs) return checkpoint();
+ async function review(message) {
   const emailBody=await mailbox.body(message.id,{includeHtml:false,includeImages:false});
-  if (!emailBody) continue;
-  const body=currentMessageText(emailBody.body||'');
-  const record={candidate:isCandidate(message,body,config),entries:[]};
+  if (!emailBody) return {candidate:fast,entries:[{uid:message.uid,subject:message.subject.slice(0,300),
+   status:'needs_review',reason:'message_unavailable'}]};
+  const text=emailBody.body||'';
+  const body=/^\s*(?:fw|fwd)\s*:/i.test(message.subject)?text:currentMessageText(text);
+  const record={candidate:fast||isCandidate(message,body,config),entries:[]};
   if (record.candidate) {
    const source=[message.subject,message.from,body.slice(0,30000)].join('\n');
    const aiStarted=performance.now();
-   const result=await runAiChain(config.ai,[{role:'user',content:JSON.stringify({email:source})}],{
+   const result=await runAiChain(config.ai,[{role:'user',content:JSON.stringify({receivedDate:dayInCalifornia(new Date(message.date)),email:source})}],{
     prompt:bidLeadPrompt,temp:0,json:true,validate:validateInvites,fetcher,
    });
    console.info('[Bid extraction]',JSON.stringify({provider:result.provider||null,
@@ -357,23 +379,69 @@ export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(
    const entry={uid:message.uid,sourceMessageId:message.id,sender:(message.from||'').slice(0,320),subject:message.subject.slice(0,300)};
    if (!result.answer.length) record.entries.push({...entry,status:'skipped',reason:'no_bid_invite'});
    for (const raw of result.answer) {
-    const lead=verifyEvidence(raw,source);
+    const lead=verifyEvidence(raw,source,message.date);
     const project=projectKey(lead.street,lead.project_name,lead.city);
     const gc=gcKey(lead.gc_company);
     const address=[lead.street,lead.city,lead.state,lead.zip].filter(Boolean).join(', ');
     const [initialStatus,initialReason]=qualify(lead,dayInCalifornia(runNow),null);
     let distance=null;
     if (initialStatus==='needs_review'&&initialReason==='distance_unverified'&&origin&&lead.street&&lead.city) {
-     if (!geocoded.has(address)) geocoded.set(address,await coordinates(address,config.geoKey,fetcher));
-     const match=geocoded.get(address);
+     if (!geocoded.has(address)) geocoded.set(address,coordinates(address,config.geoKey,fetcher).catch(()=>null));
+     const match=await geocoded.get(address);
      if (match) distance=miles(origin,match);
     }
     const [status,reason]=qualify(lead,dayInCalifornia(runNow),distance);
     record.entries.push({...entry,lead,project,gc,distance,status,reason});
    }
   }
-  processed[message.id]=record;
-  await checkpoint();
+  return record;
+ }
+ const waiting=messages.filter(message=>!processed[message.id]);
+ const parallel=fast?6:1;
+ for (let start=0;start<waiting.length;start+=parallel) {
+  if (Date.now()-started>budgetMs) return checkpoint();
+  const batch=waiting.slice(start,start+parallel);
+  const outcomes=await Promise.allSettled(batch.map(review));
+  for (const [index,outcome] of outcomes.entries()) {
+   if (outcome.status==='fulfilled') processed[batch[index].id]=outcome.value;
+  }
+  if (start+parallel<waiting.length||outcomes.some(item=>item.status==='rejected')) await checkpoint();
+  const failure=outcomes.find(item=>item.status==='rejected');
+  if (failure) throw failure.reason;
  }
  return checkpoint(true);
+}
+
+const activityKey=email=>keyFor(email)+'/activity';
+const activityTimeout=16*60000;
+
+export async function readBidScanActivity(email,store=bidReportStore(),now=Date.now()) {
+ const activity=await store.get(activityKey(email),{type:'json'});
+ if (activity?.status==='running'&&now-Date.parse(activity.at)>activityTimeout) {
+  return {...activity,status:'paused',reason:'execution_ended'};
+ }
+ return activity;
+}
+
+const safeReason=error=>typeof error?.message==='string'&&
+ /^(?:highlevel_|bid_lead_|geocode_)[a-z0-9_]+$/.test(error.message)?error.message:'mailbox_read_failed';
+
+export async function withBidScanActivity(email,run,store=bidReportStore()) {
+ const key=activityKey(email);
+ const previous=await store.getWithMetadata(key,{type:'json'});
+ if (previous?.data.status==='running'&&Date.now()-Date.parse(previous.data.at)<activityTimeout) return null;
+ const at=new Date().toISOString();
+ const claim=await store.setJSON(key,{status:'running',at},previous?{onlyIfMatch:previous.etag}:{onlyIfNew:true});
+ if (!claim.modified) return null;
+ async function finish(status,reason) {
+  await store.setJSON(key,{status,at,finishedAt:new Date().toISOString(),reason},{onlyIfMatch:claim.etag});
+ }
+ try {
+  const summary=await run();
+  await finish(summary.complete?'complete':'paused',summary.complete?null:'time_budget');
+  return summary;
+ } catch(error) {
+  await finish('failed',safeReason(error));
+  throw error;
+ }
 }
