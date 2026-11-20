@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { MAX_DOWNLOAD_BYTES } from './staged-attachments.mjs';
 import { REQUEST_LIMIT } from './mail-attachments.mjs';
 import { createIonosMailbox, ionosConfig } from './ionos.mjs';
 import { aiConfig,aiEnabled,askEmail } from './ask-ai.mjs';
@@ -55,7 +56,7 @@ const server = createServer(async(req,res)=>{
     return json(res,200,{...data,askAi:aiEnabled(ai)});
    }
    if (path==='/api/ionos/ask-ai' && req.method==='POST' && req.headers['content-type']==='application/json') {
-    const {status,data}=await askEmail(ai,mailbox,await readJson(req,16000));
+    const {status,data}=await askEmail(ai,mailbox,await readJson(req,96000));
     return json(res,status,data);
    }
    if (path==='/api/ionos/body' && req.method==='POST' && req.headers['content-type']==='application/json') {
@@ -65,7 +66,7 @@ const server = createServer(async(req,res)=>{
    }
    if (path==='/api/ionos/attachment' && req.method==='POST' && req.headers['content-type']==='application/json') {
     const input=await readJson(req);
-    const file=await mailbox.attachment(input?.id,input?.part);
+    const file=await mailbox.attachment(input?.id,input?.part,MAX_DOWNLOAD_BYTES);
     return file ? json(res,200,{type:file.type,name:file.name,data:file.content.toString('base64')}) : json(res,404,{error:'This attachment is no longer available.'});
    }
    if (path==='/api/ionos/update' && req.method==='POST' && req.headers['content-type']==='application/json') {

@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {getStore} from '@netlify/blobs';
 
 export const MAX_STAGED_BYTES=24*1024*1024;
+export const MAX_DOWNLOAD_BYTES=96*1024*1024;
 export const CHUNK_BYTES=2*1024*1024;
 export const UPLOAD_REQUEST_LIMIT=2_900_000;
 const validId=/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;

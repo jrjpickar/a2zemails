@@ -1,4 +1,7 @@
 const contactAddress=/^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/u;
+const emailKey=value=>typeof value==='string'?value.trim().toLowerCase():'';
+const nameKey=value=>String(value||'').normalize('NFKC').trim().replace(/\s+/g,' ').toLowerCase();
+const contactName=person=>nameKey(person.name||[person.firstName,person.lastName].filter(Boolean).join(' '));
 const locationPattern=/^[a-zA-Z0-9_-]{1,100}$/;
 
 export function contactsConfig(env) {
@@ -8,12 +11,12 @@ export function contactsConfig(env) {
  return token&&locationPattern.test(locationId)?{token,locationId}:null;
 }
 
-async function contactSearch(config,criteria,fetchImpl) {
+async function contactSearch(config,criteria,fetchImpl,signal=AbortSignal.timeout(4000)) {
  const result=await fetchImpl('https://services.leadconnectorhq.com/contacts/search',{
   method:'POST',
   headers:{Authorization:'Bearer '+config.token,Version:'v3',Accept:'application/json','Content-Type':'application/json'},
   body:JSON.stringify({locationId:config.locationId,page:1,...criteria}),
-  signal:AbortSignal.timeout(4000),
+  signal,
  });
  if (!result.ok) throw new Error('HighLevel contacts request failed.');
  return result.json();
@@ -45,8 +48,8 @@ export function temperatureConfig(env,contacts=contactsConfig(env)) {
 
 export async function mailboxTemperatures(mail,config,fetchImpl=fetch) {
  if (!config) return mail;
- const addresses=[...new Set(mail.mail.filter(row=>row.folder==='Inbox')
-  .map(row=>row.from.trim().toLowerCase()).filter(address=>contactAddress.test(address)))];
+ const inbox=mail.mail.filter(row=>row.folder==='Inbox');
+ const addresses=[...new Set(inbox.map(row=>emailKey(row.from)).filter(address=>contactAddress.test(address)))];
  const labels=new Map();
  try {
   const batches=[];
@@ -60,18 +63,51 @@ export async function mailboxTemperatures(mail,config,fetchImpl=fetch) {
    return data.contacts.filter(person=>batch.includes(person.email?.trim().toLowerCase())&&
     (!person.locationId||person.locationId===config.locationId));
   }));
-  for (const person of results.flat()) {
-   const address=person.email.trim().toLowerCase();
+  const matchedAddresses=new Set();
+  function addLabel(address,person) {
+   matchedAddresses.add(address);
    const value=person.customFields?.find(field=>field.id===config.fieldId)?.value;
    const label=typeof value==='string'?value.trim().toLowerCase():'';
-   if (!['cold','warm','hot','vip'].includes(label)) continue;
+   if (!['cold','warm','hot','vip'].includes(label)) return;
    labels.set(address,labels.has(address)&&labels.get(address)!==label ? null : label);
+  }
+  for (const person of results.flat()) addLabel(emailKey(person.email),person);
+  const peopleByName=new Map();
+  for (const row of inbox) {
+   const address=emailKey(row.from);
+   const name=nameKey(row.name);
+   if (matchedAddresses.has(address)||!contactAddress.test(address)||name===address||name.length>75||name.split(' ').length<2) continue;
+   if (!peopleByName.has(name)) peopleByName.set(name,new Set());
+   peopleByName.get(name).add(address);
+  }
+  // Bound concurrent fallback calls and look up each unresolved name once.
+  const names=[...peopleByName];
+  const nameMatches=new Map();
+  const nameBudget=AbortSignal.timeout(3500);
+  for (let offset=0;offset<names.length&&!nameBudget.aborted;offset+=8) {
+   await Promise.all(names.slice(offset,offset+8).map(async ([name,senders])=>{
+    try {
+     const data=await contactSearch(config,{query:name,pageLimit:25},fetchImpl,nameBudget);
+     if (!Array.isArray(data.contacts)||data.contacts.length>=25) return;
+     const exact=data.contacts.filter(person=>(!person.locationId||person.locationId===config.locationId)&&contactName(person)===name);
+     for (const address of senders) {
+      const aliases=exact.filter(person=>Array.isArray(person.additionalEmails)&&person.additionalEmails.some(alias=>emailKey(alias?.email)===address));
+      const person=aliases.length===1?aliases[0]:senders.size===1&&exact.length===1?exact[0]:null;
+      if (!person?.id) continue;
+      if (!nameMatches.has(address)) nameMatches.set(address,new Map());
+      nameMatches.get(address).set(person.id,person);
+     }
+    } catch { /* Preserve verified email matches when a fallback lookup fails. */ }
+   }));
+  }
+  for (const [address,matches] of nameMatches) {
+   if (matches.size===1) addLabel(address,matches.values().next().value);
   }
  } catch {
   return {...mail,temperatureFolders:true,temperatureUnavailable:true};
  }
  return {...mail,temperatureFolders:true,mail:mail.mail.map(row=>{
-  const temperature=row.folder==='Inbox'&&labels.get(row.from.trim().toLowerCase());
+  const temperature=row.folder==='Inbox'&&labels.get(emailKey(row.from));
   return temperature?{...row,temperature}:row;
  })};
 }

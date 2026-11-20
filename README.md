@@ -157,3 +157,18 @@ Sent messages and expanded conversation entries show the signature saved with th
 The Inbox uses an ordinary IMAP folder named **A2Z Trash** for newly trashed messages. It appears together with existing IONOS Trash in the app and keeps the new messages recoverable for at least 30 days unless they are deleted manually. A2Z keeps them past 30 days as well. Messages previously moved into IONOS Trash by another client still follow that client's or provider's settings.
 
 Use **Restore message** or the Move menu to recover an email. **Delete forever** asks for confirmation and permanently removes the selected message from Trash when the IMAP server supports targeted UID expunge. Hover over a message row or focus it with the keyboard to **Mark as read** or **Mark as unread** next to Trash.
+
+### Read-only Bid Lead Finder dry run
+
+This deployment adds an on-demand Netlify Background Function. It reads the preceding 30 days of **INBOX** directly from IONOS using read-only mailbox locks, extracts invite evidence with Gemini then Groq, and checks HighLevel opportunities across all pipelines and statuses in the configured location. It does not download attachments or change mail or HighLevel records. The Command Center shows the mailbox's checkpoint, skip reasons and skipped subjects. Completed dry runs remain available in Netlify Blobs. No PostgreSQL connection is needed.
+
+Configure the inbox site's **Production → Functions** environment.
+
+- Reuse `GHL_CONTACTS_PIT_TOKEN` and `GHL_CONTACTS_LOCATION_ID` (or a single `GHL_LOCATION_IDS` value). The PIT needs read access to opportunities, pipelines, and contacts. Add `locations/customFields.readonly` for discovery of the Opportunity Project Name field or set `GHL_PROJECT_NAME_FIELD_ID` to that field's ID.
+- Reuse `GEMINI_API_KEY` and `GROQ_API_KEY`. Set `BID_GEOCODING_API_KEY` to a server-restricted Google Maps Geocoding API key to score distance. Without it, otherwise viable leads with unverified distances go to Needs Review.
+- Reuse `MCP_IONOS_EMAIL` and `MCP_IONOS_PASSWORD` or the corresponding `GHL_IONOS_MAILBOX_PASSWORDS` entry. The mailbox must be allowlisted. Set `BID_DRY_RUN_TOKEN` to a separate random secret of at least 32 characters. Keep all credentials server-side.
+- `DEDUPE_SCOPE` defaults to `global`. `BID_LEAD_TERMS` and `BID_LEAD_DOMAINS` are optional comma-separated candidate-filter overrides.
+
+When authorized, send a POST to `/.netlify/functions/bid-dry-run-background` with the `BID_DRY_RUN_TOKEN` as a bearer credential. The 202 acknowledges invocation. Check the Netlify function log and the Command Center for results. Reinvoking an incomplete run resumes from its checkpoint. Reinvoking a completed run returns its stored summary. This dry-run release has no recurring schedule or Desk write path.
+
+Hosted inbox attachment downloads use 2 MiB chunks and support up to 96 MiB of decoded attachment data. The original 24 MiB send and forward limits still apply. Temperature folders fetch fresh matches on mailbox load and refresh. They use exact sender email first, then a unique exact HighLevel contact name, preferring a matching additional email where available.

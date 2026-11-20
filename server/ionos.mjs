@@ -252,6 +252,22 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    return readConnection(async imap=>(await imap.list()).filter(
     folder=>!folder.flags.has('\\Noselect')).map(folder=>({path:folder.path,role:folder.specialUse||null})));
   },
+  recentInbox(since) {
+   return readFolder('INBOX',async imap=>{
+    const generation=String(imap.mailbox.uidValidity);
+    const uids=await imap.search({since},{uid:true})||[];
+    const rows=[];
+    for (let start=0;start<uids.length;start+=100) {
+     const batch=await imap.fetchAll(uids.slice(start,start+100),{
+      uid:true,envelope:true,internalDate:true,flags:true,
+     },{uid:true});
+     for (const item of batch) {
+      if (item.internalDate>=since&&!item.flags?.has('\\Deleted')) rows.push(messageMetadata(item,'INBOX',generation));
+     }
+    }
+    return rows.sort((a,b)=>a.uid-b.uid);
+   });
+  },
   messagePage(folder,{before,after,limit,generation}) {
    return readFolder(folder,async imap=>{
     const uidValidity=String(imap.mailbox.uidValidity);
@@ -380,7 +396,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
      if (limit<=0) throw new TypeError('Attachments must total 24 MB or less.');
      const result=await readPart(imap,uid,part,limit);
      if (!result) return null;
-     if (result.truncated) throw new TypeError('Attachments must total 24 MB or less.');
+     if (result.truncated) throw new TypeError(limit>MAX_STAGED_BYTES ? 'This attachment exceeds the download limit.' : 'Attachments must total 24 MB or less.');
      return {name:file.name,type:previewType(file,result.raw),content:result.raw};
     } finally {lock.release();}
    } finally {imap.close();}

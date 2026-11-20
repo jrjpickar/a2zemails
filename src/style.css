@@ -10,3 +10,35 @@
 .ask-ai-form p{margin:0}
 .ask-ai-answer p{white-space:pre-wrap;overflow-wrap:anywhere}
 .temperature-unavailable{display:block;padding:0 12px 6px;color:inherit}
+.ask-ai-toolbar{flex:none;margin-left:auto}
+.ask-ai-toolbar + .search{margin-left:0}
+.ask-ai-toolbar .ask-ai-trigger{height:36px;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.ask-ai-dialog{width:min(540px,calc(100vw - 28px));max-height:85dvh;box-sizing:border-box;padding:16px;background:var(--surface,#fff);color:var(--ink,#252b22);border:1px solid var(--line);border-radius:10px}
+.ask-ai-dialog::backdrop{background:#17141180}
+.ask-ai-dialog header{display:flex;align-items:center;justify-content:space-between}
+.ask-ai-context{margin:4px 0;color:var(--muted);overflow-wrap:anywhere}
+.ask-ai-conversation{display:grid;gap:12px;max-height:45dvh;overflow:auto}
+.ask-ai-answer strong,.ask-ai-answer small{display:block;overflow-wrap:anywhere}
+.ask-ai-answer small{color:var(--muted)}
+@media(max-width:639px){
+ .topbar-with-ai .ask-ai-toolbar .ask-ai-trigger{width:36px;justify-content:center;padding:0}
+ .topbar-with-ai .ask-ai-trigger span{display:none}
+ .topbar-with-ai .search{min-width:194px}
+ .topbar-with-ai .search input{min-width:160px}
+ .topbar-with-ai .search:has(button){min-width:224px}
+ .topbar-with-ai .search{padding-inline:5px;gap:4px}
+ .topbar-with-ai .demo-pill{font-size:0;gap:0;padding-inline:5px}
+}
+@media(max-width:760px){
+ .topbar-with-ai .ask-ai-toolbar .ask-ai-trigger,.topbar-with-ai .search{height:44px}
+}
+@media(max-width:400px){
+ .topbar.topbar-with-ai{gap:3px;padding-inline:5px}
+ .topbar-with-ai .nav-toggle,.topbar-with-ai .theme-toggle,.topbar-with-ai .demo-pill{flex:0 0 28px;width:28px;padding-inline:0;justify-content:center}
+ .topbar-with-ai .demo-pill i{display:none}
+ .topbar-with-ai .demo-pill svg{display:block}
+}
+.bid-import-report{margin-top:16px}
+.bid-import-report header .icon{margin-left:auto}
+.bid-import-report details{padding:0 16px 12px}
+.bid-import-report li{overflow-wrap:anywhere}

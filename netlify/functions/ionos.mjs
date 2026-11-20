@@ -1,7 +1,8 @@
+import {readBidReport} from '../../server/bid-leads.mjs';
 import {contactsConfig,searchContacts,mailboxTemperatures,temperatureConfig} from '../../server/ghl-contacts.mjs';
 import {aiConfig,aiEnabled,askEmail} from '../../server/ask-ai.mjs';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
-import { stagedAttachments, stagedFiles, CHUNK_BYTES, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
+import { stagedAttachments, stagedFiles, CHUNK_BYTES, MAX_DOWNLOAD_BYTES, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
 import { largeFileLinks,largeFileRefs,largeFilesEnabled } from '../../server/large-file-links.mjs';
 import { REQUEST_LIMIT } from '../../server/mail-attachments.mjs';
 import { mailboxPreferences } from '../../server/mail-preferences.mjs';
@@ -118,6 +119,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     reason:session?.highLevel?'ghl_mailbox':'session_expired',
    },401,usesCookie?sessionCookie('',0):undefined);
    if (usesCookie && action==='session' && request.method==='GET') return reply({email:login.email});
+   if (action==='bid-import-report' && request.method==='GET') return reply({report:await readBidReport(login.email)});
    if (action==='contacts' && request.method==='POST') {
     if (!contacts || (session?.highLevel && session.highLevel.activeLocation!==contacts.locationId)) return reply({contacts:[]});
     const input=await readInput(request,2048);
@@ -177,7 +179,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     return reply({...data,askAi:aiEnabled(ai)});
    }
    if (action==='ask-ai' && request.method==='POST') {
-    const {status,data}=await askEmail(ai,mailbox,await readInput(request,16000));
+    const {status,data}=await askEmail(ai,mailbox,await readInput(request,96000));
     return reply(data,status);
    }
    if (action==='body' && request.method==='POST') {
@@ -187,7 +189,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    }
    if (action==='attachment' && request.method==='POST') {
     const input=await readInput(request,8192);
-    const file=await mailbox.attachment(input?.id,input?.part);
+    const file=await mailbox.attachment(input?.id,input?.part,MAX_DOWNLOAD_BYTES);
     if (!file) return reply({error:'This attachment is no longer available. Refresh the mailbox.'},404);
     const ticket=randomUUID();
     const fileId=randomUUID();
@@ -202,7 +204,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    }
    if (action==='attachment-chunk' && request.method==='POST') {
     const input=await readInput(request,4096);
-    const chunk=await uploadsFactory(login.email).readChunk(input?.ticket,input?.fileId,input?.index);
+    const chunk=await uploadsFactory(login.email).readChunk(input?.ticket,input?.fileId,input?.index,MAX_DOWNLOAD_BYTES);
     return chunk ? reply({data:chunk.toString('base64')}) : reply({error:'Attachment download expired. Reopen the file.'},404);
    }
    if (action==='attachment-release' && request.method==='POST') {
@@ -231,6 +233,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='update' && request.method==='POST') return reply(await mailbox.update(await readInput(request,4096)));
    return reply({error:'Unknown mailbox action.'},404);
   } catch(error) {
+   if (action==='bid-import-report') return reply({error:'Could not load the bid import report. Try again.'},502);
    if (action==='contacts') return reply({
     error:error instanceof TypeError?'Invalid contact search.':'HighLevel contacts are temporarily unavailable.',
    },error instanceof TypeError?400:502);
