@@ -12,7 +12,7 @@ export function createBidDryRunHandler(env,makeMailbox=createIonosMailbox,run=dr
    const mailbox=makeMailbox(ionosConfig({
     ...env,A2Z_ENABLE_LIVE:'true',IONOS_EMAIL:login.email,IONOS_PASSWORD:login.password,
    }));
-   const summary=await run({email:login.email,mailbox,config});
+   const summary=await run({email:login.email,mailbox,config,fresh:new URL(request.url).searchParams.get('fresh')==='1'});
    const {complete,counts,pipelines,reasons,providers,dedupeScope}=summary;
    console.info('[Bid dry run]',JSON.stringify({complete,counts,pipelines,reasons,providers,dedupeScope}));
   } catch(error) {

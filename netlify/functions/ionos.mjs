@@ -1,4 +1,5 @@
-import {readBidReport} from '../../server/bid-leads.mjs';
+import {bidImportSettings,bidPreview,bookQualifiedBid,currentQualifiedBids,inspectBidEmail,oneEmailBids,qualifiedBids,qualifiedBidCsv} from '../../server/bid-import.mjs';
+import {dayInCalifornia,readBidReport} from '../../server/bid-leads.mjs';
 import {contactsConfig,searchContacts,mailboxTemperatures,temperatureConfig} from '../../server/ghl-contacts.mjs';
 import {aiConfig,aiEnabled,askEmail} from '../../server/ask-ai.mjs';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
@@ -120,6 +121,42 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    },401,usesCookie?sessionCookie('',0):undefined);
    if (usesCookie && action==='session' && request.method==='GET') return reply({email:login.email});
    if (action==='bid-import-report' && request.method==='GET') return reply({report:await readBidReport(login.email)});
+   if (action==='bid-scan' && request.method==='POST') {
+    if (login.email!==env.MCP_IONOS_EMAIL?.trim().toLowerCase()) return reply({error:'This mailbox is not configured for bid scanning.'},403);
+    const key=env.BID_DRY_RUN_TOKEN;
+    const site=env.URL;
+    if (!site||!key||key.length<32) return reply({error:'Bid scanning is not configured on this deployment.'},503);
+    const input=await readInput(request,256);
+    const endpoint=new URL('/.netlify/functions/bid-dry-run-background',site);
+    if (endpoint.protocol!=='https:') return reply({error:'Bid scanning needs the deployed HTTPS site URL.'},503);
+    if (input?.fresh===true) endpoint.searchParams.set('fresh','1');
+    const response=await fetch(endpoint,{method:'POST',headers:{Authorization:'Bearer '+key},signal:AbortSignal.timeout(5000)});
+    return response.status===202||response.ok ? reply({accepted:true},202) :
+     reply({error:'The bid scan could not be queued.'},502);
+   }
+   if (action==='bid-qualified' && request.method==='GET') {
+    const source=url.searchParams.get('message');
+    const entries=source?await oneEmailBids(login.email,source):await qualifiedBids(login.email);
+    const rows=entries;
+    const page=Number(url.searchParams.get('page')||0);
+    if (!Number.isSafeInteger(page)||page<0||page>10000) return reply({error:'Invalid lead page.'},400);
+    return reply({complete:entries!==null,bookingEnabled:Boolean(bidImportSettings(env)),total:rows?.length||0,
+     leads:(rows||[]).slice(page*25,(page+1)*25).map(bidPreview)});
+   }
+   if (action==='bid-qualified-csv' && request.method==='GET') {
+    const entries=await currentQualifiedBids(login.email,env);
+    if (!entries) return reply({error:'Finish the bid scan before exporting.'},409);
+    const filename='a2z-leads-'+dayInCalifornia(new Date())+'.csv';
+    return new Response(qualifiedBidCsv(entries),{headers:{
+     'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="'+filename+'"',
+     'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',
+    }});
+   }
+   if (action==='bid-book' && request.method==='POST') {
+    const input=await readInput(request,2048);
+    const {status,...result}=await bookQualifiedBid({email:login.email,id:input?.id,message:input?.message,env});
+    return reply(result,status);
+   }
    if (action==='contacts' && request.method==='POST') {
     if (!contacts || (session?.highLevel && session.highLevel.activeLocation!==contacts.locationId)) return reply({contacts:[]});
     const input=await readInput(request,2048);
@@ -173,6 +210,17 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     return reply({ok:true});
    }
    const mailbox = mailboxFactory(configFor(login));
+   if (action==='bid-inspect' && request.method==='POST') {
+    const input=await readInput(request,2048);
+    const {status,...result}=await inspectBidEmail({email:login.email,id:input?.id,mailbox,env});
+    return reply(result,status);
+   }
+   if (action==='mail-search' && request.method==='POST') {
+    const input=await readInput(request,512000);
+    const result=await mailbox.mailSearch(input);
+    if (result.resetRequired) return reply({error:'This folder changed. Start a new search.'},409);
+    return reply(result);
+   }
    if (action==='mail' && request.method==='GET') {
     const canReadTemperature=temperature&&(!session.highLevel||session.highLevel.activeLocation===temperature.locationId);
     const data=await mailboxTemperatures(await mailbox.mail(),canReadTemperature?temperature:null);
@@ -233,6 +281,9 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='update' && request.method==='POST') return reply(await mailbox.update(await readInput(request,4096)));
    return reply({error:'Unknown mailbox action.'},404);
   } catch(error) {
+   if (['bid-qualified','bid-qualified-csv','bid-book','bid-scan','bid-inspect'].includes(action)) return reply({
+    error:'The Estimating Desk request could not complete. Check the server setup and try again.',
+   },502);
    if (action==='bid-import-report') return reply({error:'Could not load the bid import report. Try again.'},502);
    if (action==='contacts') return reply({
     error:error instanceof TypeError?'Invalid contact search.':'HighLevel contacts are temporarily unavailable.',

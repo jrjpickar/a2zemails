@@ -42,3 +42,12 @@
 .bid-import-report header .icon{margin-left:auto}
 .bid-import-report details{padding:0 16px 12px}
 .bid-import-report li{overflow-wrap:anywhere}
+.qualified-bids,.bid-scan{margin:12px 0}
+.bid-scan{margin-left:16px}
+.qualified-bids>header .project-tag{margin-left:auto}
+.qualified-bid-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 16px;border-top:1px solid var(--line)}
+.qualified-bid-row small{display:block;margin-top:5px;color:var(--muted)}
+.qualified-bid-row>div{min-width:0;overflow-wrap:anywhere}
+.qualified-bid-pages{display:flex;align-items:center;gap:10px;padding:10px 16px;flex-wrap:wrap}
+.qualified-bids dialog dd{margin:0 0 8px;overflow-wrap:anywhere}
+.qualified-bids dialog dt{font-weight:700}

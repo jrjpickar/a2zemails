@@ -138,20 +138,21 @@ export async function readDesk(config,fetcher=fetch) {
   for (;;) {
    const data=await ghlGet(config,'/opportunities/search',params,fetcher);
    if (!Array.isArray(data.opportunities)) throw new Error('highlevel_invalid_opportunities');
+   const missing=[...new Set(data.opportunities.filter(row=>!row?.contact?.companyName)
+    .map(row=>row?.contactId||row?.contact?.id).filter(id=>typeof id==='string'&&!companies.has(id)))];
+   for (let start=0;start<missing.length;start+=6) {
+    await Promise.all(missing.slice(start,start+6).map(async id=>{
+     const details=await ghlGet(config,'/contacts/'+encodeURIComponent(id),{},fetcher);
+     if (!details.contact) throw new Error('highlevel_invalid_contact');
+     companies.set(id,details.contact.companyName||details.contact.name||'');
+    }));
+   }
    for (const row of data.opportunities) {
     if (!row?.id||seen.has(row.id)||row.pipelineId!==id) throw new Error('highlevel_inconsistent_pagination');
     seen.add(row.id);
     const contact=row.contact||{};
     const contactId=row.contactId||contact.id;
-    let company=contact.companyName;
-    if (!company&&contactId) {
-     if (!companies.has(contactId)) {
-      const details=await ghlGet(config,'/contacts/'+encodeURIComponent(contactId),{},fetcher);
-      if (!details.contact) throw new Error('highlevel_invalid_contact');
-      companies.set(contactId,details.contact.companyName||details.contact.name||'');
-     }
-     company=companies.get(contactId);
-    }
+    const company=contact.companyName||companies.get(contactId);
     const projectName=row.customFields?.find(field=>field.id===projectNameId);
     const name=projectName?.fieldValue||projectName?.field_value||projectName?.value||row.name;
     const address=/^\s*\d+\s/.test(row.name||'')?row.name:row.address||contact.address1||contact.address;
@@ -214,7 +215,7 @@ export async function readBidReport(email,store=bidReportStore()) {
 }
 
 const offsetFormatter=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Los_Angeles',year:'numeric',month:'2-digit',day:'2-digit'});
-const dayInCalifornia=date=>{
+export const dayInCalifornia=date=>{
  const parts=offsetFormatter.formatToParts(date);
  // Use numeric components to avoid locale-specific separators.
  const get=type=>parts.find(part=>part.type===type).value;
@@ -222,12 +223,13 @@ const dayInCalifornia=date=>{
  return (year.length===2?'20'+year:year)+'-'+get('month').padStart(2,'0')+'-'+get('day').padStart(2,'0');
 };
 
-export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(),fetcher=fetch,now=new Date(),budgetMs=11*60000}) {
+export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(),fetcher=fetch,now=new Date(),budgetMs=11*60000,fresh=false}) {
  if (!config.desk||!aiEnabled(config.ai)) throw new Error('bid_lead_credentials_missing');
  const key=keyFor(email)+'/report';
  const loaded=await store.getWithMetadata(key,{type:'json'});
- const state=loaded?.data;
- if (state?.complete) return state.summary;
+ const existing=loaded?.data;
+ if (existing?.complete&&!fresh) return existing.summary;
+ const state=existing?.complete?null:existing;
  const started=Date.now();
  const runDate=state?.runDate||now.toISOString();
  const runNow=new Date(runDate);
@@ -352,7 +354,7 @@ export async function dryRunBidLeads({email,mailbox,config,store=bidReportStore(
     fallbackReason:result.fallbackReason||result.reason||null,latencyMs:Math.round(performance.now()-aiStarted)}));
    if (!result.provider) throw new Error(result.stop?'bid_lead_provider_configuration':'bid_lead_provider_unavailable');
    record.provider=result.provider;
-   const entry={uid:message.uid,sourceMessageId:message.id,subject:message.subject.slice(0,300)};
+   const entry={uid:message.uid,sourceMessageId:message.id,sender:(message.from||'').slice(0,320),subject:message.subject.slice(0,300)};
    if (!result.answer.length) record.entries.push({...entry,status:'skipped',reason:'no_bid_invite'});
    for (const raw of result.answer) {
     const lead=verifyEvidence(raw,source);

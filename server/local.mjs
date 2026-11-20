@@ -51,6 +51,11 @@ const server = createServer(async(req,res)=>{
  try {
   if (path.startsWith('/api/ionos/')) {
    if (!authorized(req)) return json(res,403,{error:'Reload the local IONOS app to start a session.'});
+   if (path==='/api/ionos/mail-search' && req.method==='POST' && req.headers['content-type']==='application/json') {
+    const result=await mailbox.mailSearch(await readJson(req,512000));
+    if (result.resetRequired) return json(res,409,{error:'This folder changed. Start a new search.'});
+    return json(res,200,result);
+   }
    if (path==='/api/ionos/mail' && req.method==='GET') {
     const data=await mailboxTemperatures(await mailbox.mail(),temperature);
     return json(res,200,{...data,askAi:aiEnabled(ai)});

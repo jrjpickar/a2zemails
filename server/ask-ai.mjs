@@ -137,11 +137,14 @@ export async function askEmail(config,mailbox,input,fetcher=fetch) {
    return budget.aborted ? unavailable :
     {status:404,data:{error:'This email is no longer available. Refresh the mailbox and try again.'}};
   }
+  const matches=typeof mailbox.mailSearch==='function'
+   ? await findRelevantMail(mailbox,question,input.id,budget) : undefined;
   const body=message.body||'';
   const turns=[...history,{role:'user',content:question}];
   const messages=[{role:'user',content:JSON.stringify({
    question:turns[0].content,subject:message.subject?.slice(0,500)||'',
    email:body.slice(0,12000),excerptIncomplete:Boolean(message.truncated||body.length>12000),
+   ...(matches?{mailboxMatches:matches}:{}),
   })},...turns.slice(1)];
   const result=await runAiChain(config,messages,{budget,fetcher,attempts});
   answeredBy=result.provider;
@@ -159,7 +162,34 @@ export async function askEmail(config,mailbox,input,fetcher=fetch) {
  }
 }
 
+const commonWords=new Set('does could would should please find look search across through whole mailbox inbox email emails message messages what when where which that this they have with were from about last earlier there these those tell give show need your mine them more help answer summarize summary'.split(' '));
+
+async function findRelevantMail(mailbox,question,selectedId,budget) {
+ const keywords=[...new Set(question.toLowerCase().match(/[a-z0-9][a-z0-9@.\-]{2,}/g)||[])]
+  .filter(word=>!commonWords.has(word)).slice(0,10);
+ if (!keywords.length) return {excerpts:[],coverage:'no_search_terms'};
+ const signal=AbortSignal.any([budget,AbortSignal.timeout(10000)]);
+ try {
+  const result=await waitForContext(mailbox.mailSearch({query:keywords.join(' ')},16,true),signal);
+  if (!result) return {excerpts:[],coverage:'search_timed_out'};
+  const score=row=>keywords.reduce((sum,word)=>sum+Number((row.subject+' '+row.from).toLowerCase().includes(word)),0);
+  const rows=result.mail.filter(row=>row.id!==selectedId)
+   .map(row=>({row,score:score(row)})).sort((a,b)=>b.score-a.score).slice(0,6);
+  const excerpts=await waitForContext(Promise.all(rows.map(async ({row})=>{
+   let body='';
+   try {
+    const result=await mailbox.body(row.id,{includeHtml:false,includeImages:false});
+    body=(result?.body||'').slice(0,2400);
+   } catch { /* Still provide authenticated envelope metadata. */ }
+   return {subject:row.subject.slice(0,300),from:row.from.slice(0,320),date:row.date,folder:row.folder,excerpt:body};
+  })),signal);
+  return {excerpts:excerpts||rows.map(({row})=>({subject:row.subject,from:row.from,date:row.date,folder:row.folder,excerpt:''})),
+   coverage:'top_keyword_matches_across_all_folders'};
+ } catch {return {excerpts:[],coverage:'search_unavailable'};}
+}
+
 async function waitForContext(request,signal) {
+ if (signal.aborted) {void request.catch(()=>{});return null;}
  let onAbort;
  try {
   return await Promise.race([request,new Promise(resolve=>{

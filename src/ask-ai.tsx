@@ -48,7 +48,7 @@ export function AskAi({ask,prefill='',toolbar=false,subject}:{
   <dialog ref={dialog} className="ask-ai-dialog" aria-label="Ask AI"
    onClose={()=>button.current?.focus()} onKeyDown={event=>{if(event.key==='Escape') event.stopPropagation()}}>
    <header><strong>Ask AI</strong><button type="button" className="icon" aria-label="Close Ask AI" onClick={()=>dialog.current?.close()}><X size={18}/></button></header>
-   <p className="ask-ai-context">{subject||'Select an email to give Ask AI context.'}</p>
+   <p className="ask-ai-context">{subject||'Ask about messages across your mailbox.'}</p>
    <form className="ask-ai-form" onSubmit={submit}>
     {exchanges.length>0&&<div className="ask-ai-conversation" role="log" aria-label="Conversation">
      {exchanges.map(({question,answer},index)=><div key={index} className="ask-ai-answer">

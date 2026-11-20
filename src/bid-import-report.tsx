@@ -1,6 +1,7 @@
 import {useEffect,useState} from 'react';
 import {ClipboardList,RotateCcw} from 'lucide-react';
 import {hostedRequest} from './hosted';
+import {QualifiedBids} from './qualified-bids';
 
 type Report={
  complete:boolean;asOf:string;totalMessages:number;counts:{messagesScanned:number;candidates:number;qualified:number;needsReview:number;skipped:number};
@@ -20,6 +21,8 @@ export function BidImportReport({token}:{token:string}) {
  const [report,setReport]=useState<Report|null>(null);
  const [pending,setPending]=useState(true);
  const [failed,setFailed]=useState(false);
+ const [scan,setScan]=useState('');
+ const [starting,setStarting]=useState(false);
  useEffect(()=>{
   const controller=new AbortController();
   setPending(true);
@@ -34,10 +37,21 @@ export function BidImportReport({token}:{token:string}) {
   return ()=>controller.abort();
  },[token,version]);
 
- return <section className="queue bid-import-report">
+ async function runScan() {
+  setStarting(true);setScan('');
+  try {
+   await hostedRequest('bid-scan',{fresh:report?.complete===true},token);
+   setScan('Scan queued. Refresh the report to check progress.');
+  } catch(error) {setScan(error instanceof Error?error.message:'The scan could not be queued.');}
+  finally {setStarting(false);}
+ }
+
+ return <><section className="queue bid-import-report">
   <header><ClipboardList size={17}/><h2>Skipped auto import</h2>
    <button type="button" className="icon" aria-label="Refresh bid import report" onClick={()=>setVersion(value=>value+1)} disabled={pending}><RotateCcw size={16}/></button>
   </header>
+  <button className="project-tag bid-scan" type="button" disabled={starting||pending} onClick={()=>void runScan()}>{report&&!report.complete?'Resume bid scan':'Scan last 30 days'}</button>
+  {scan&&<p role="status">{scan}</p>}
   {pending&&<p role="status">Loading bid import report…</p>}
   {failed&&<p role="alert">Could not load the bid import report.</p>}
   {!pending&&!failed&&!report&&<p>No dry run has been recorded for this mailbox.</p>}
@@ -49,5 +63,5 @@ export function BidImportReport({token}:{token:string}) {
     <ul>{report.skipped.map((item,index)=><li key={item.uid+':'+index}><strong>{item.subject}</strong> · {reasonLabel(item.reason)}</li>)}</ul>
    </details>}
   </>}
- </section>;
+ </section><QualifiedBids token={token} reportVersion={version}/></>;
 }

@@ -99,11 +99,13 @@ export async function groqCategories(mail,email,key,fetcher=fetch) {
   pending.push({id:message.id,subject,body,subjectOnly:!body,cacheKey});
  }
  const signal = AbortSignal.timeout(deadlineMs);
- const requests = [];
- for (let start=0; start<pending.length; start+=batchSize) {
-  requests.push(classifyBatch(pending.slice(start,start+batchSize),key,signal,fetcher,labels));
+ // Keep bursts bounded when a full Inbox is opened. Unprocessed batches use rules.
+ const parallel=6;
+ for (let start=0;start<pending.length&&!signal.aborted;start+=parallel*batchSize) {
+  const offsets=Array.from({length:parallel},(_,index)=>start+index*batchSize).filter(offset=>offset<pending.length);
+  await Promise.allSettled(offsets.map(offset=>classifyBatch(
+   pending.slice(offset,offset+batchSize),key,signal,fetcher,labels,
+  )));
  }
- // Use rules for failed batches and keep the results from independent successful batches.
- await Promise.allSettled(requests);
  return labels;
 }

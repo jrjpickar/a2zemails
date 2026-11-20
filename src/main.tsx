@@ -10,12 +10,14 @@ import {useComposePosition} from './compose-position';
 import {MessageText} from './message-text';
 import {AskAi} from './ask-ai';
 import {BidImportReport} from './bid-import-report';
+import {QualifiedBids} from './qualified-bids';
 import {RecipientInput,type Contact} from './recipient-input';
 import {rememberedSession,hostedRequest,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
 import './style.css';
 import './theme.css';
 const temperatures=[['cold','Cold'],['warm','Warm'],['hot','Hot'],['vip','VIP']] as const;
 type Temperature=typeof temperatures[number][0];
+type SearchCursor={path:string;before:number;generation:string};
 type Message={id:string;temperature?:Temperature;thread:string;name:string;company:string;subject:string;date:string;body:string;sentSignatureImage?:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
 type Upload={name:string;data:string;size?:number};
 type StagedUpload={id:string;name:string;size:number};
@@ -111,7 +113,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    throw error;
   }
  }
- const [state,setState]=useState<State>(()=>getState(liveToken)),[nav,setNav]=useState('Inbox'),[selected,setSelected]=useState('mail-0'),[query,setQuery]=useState(''),[filter,setFilter]=useState('All mail'),[projectFilter,setProjectFilter]=useState(''),[marked,setMarked]=useState<string[]>([]),[compose,setCompose]=useState<string|null>(null),[preview,setPreview]=useState<string|null>(null),[livePreview,setLivePreview]=useState<AttachmentSource|null>(null),[toast,setToast]=useState(''),[menu,setMenu]=useState(''),[mobileRead,setMobileRead]=useState(false),[side,setSide]=useState(false),[help,setHelp]=useState(false),[limit,setLimit]=useState(60);
+ const [state,setState]=useState<State>(()=>getState(liveToken)),[nav,setNav]=useState('Inbox'),[selected,setSelected]=useState('mail-0'),[query,setQuery]=useState(''),[filter,setFilter]=useState('All mail'),[projectFilter,setProjectFilter]=useState(''),[marked,setMarked]=useState<string[]>([]),[compose,setCompose]=useState<string|null>(null),[preview,setPreview]=useState<string|null>(null),[livePreview,setLivePreview]=useState<AttachmentSource|null>(null),[toast,setToast]=useState(''),[menu,setMenu]=useState(''),[mobileRead,setMobileRead]=useState(false),[side,setSide]=useState(false),[help,setHelp]=useState(false),[limit,setLimit]=useState(liveToken?200:60);
  const [theme,setTheme]=useState(() => {
   try { return localStorage.getItem('a2z-theme')==='color'?'color':'dark'; }
   catch { return 'dark'; }
@@ -149,6 +151,10 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   try { localStorage.setItem('a2z-theme',theme); } catch {}
  },[theme]);
 
+ const [mailSearch,setMailSearch]=useState<{query:string;mail:Message[];next:SearchCursor[]}>({query:'',mail:[],next:[]});
+ const [searchBusy,setSearchBusy]=useState(false);
+ const [searchError,setSearchError]=useState('');
+ const searchRevision=React.useRef(0);
  const refreshing = React.useRef<Promise<void>|null>(null);
  const mailboxRevision = React.useRef(0);
  const moving = React.useRef(new Set<string>());
@@ -204,7 +210,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   if (hosted) void syncPreferences();
  },[account,hosted,liveToken]);
  const mail=state.mail;
- const row=mail.find(m=>m.id===selected);
+ const row=mail.find(m=>m.id===selected)||(mailSearch.query===query.trim()?mailSearch.mail.find(m=>m.id===selected):undefined);
  const draft=state.drafts.find(d=>d.id===compose);
  const composeWindow=useComposePosition(draft?.id);
  const draftPayload=draft?JSON.stringify(draft):'';
@@ -274,7 +280,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   if (categories.includes(folder)) return message.category===folder&&!['Trash','Spam'].includes(message.folder);
   return message.folder===folder;
  }
- const list=useMemo(()=>mail.filter(m=>{
+ const localList=useMemo(()=>mail.filter(m=>{
   if(query.trim())return searchMail(m,query);
   const inView=inFolder(m,nav);
   return inView&&(!projectFilter||m.project===projectFilter)&&(filter==='All mail'||(filter==='Unread'&&m.unread)||(filter==='Starred'&&m.star)||(filter==='Attachments'&&m.files.length>0)||(filter==='Incoming'&&m.folder==='Inbox'&&m.unread)||(filter==='Urgent'&&queues.urgent.some(item=>item.id===m.id)));
@@ -282,6 +288,39 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const unreadCounts=Object.fromEntries(groups.flatMap(group=>group.links.map(([label])=>[
   label,mail.filter(message=>message.unread&&inFolder(message,label)).length
  ])));
+ const activeSearch=query.trim();
+ const list=useMemo(()=>{
+  if (!activeSearch||mailSearch.query!==activeSearch) return localList;
+  const unique=new Map(mailSearch.mail.map(item=>[item.id,item]));
+  for (const item of localList) unique.set(item.id,item);
+  return [...unique.values()].sort((a,b)=>b.date.localeCompare(a.date));
+ },[localList,activeSearch,mailSearch]);
+ async function searchOlder(term:string,revision:number,positions?:SearchCursor[]) {
+  setSearchBusy(true);
+  setSearchError('');
+  try {
+   const data:{mail:Message[];next:SearchCursor[]}=await liveRequest('mail-search',{query:term,positions});
+   if (revision!==searchRevision.current) return;
+   setMailSearch(previous=>{
+    const rows=new Map((positions&&previous.query===term?previous.mail:[]).map(item=>[item.id,item]));
+    for (const item of data.mail) rows.set(item.id,item);
+    return {query:term,mail:[...rows.values()],next:data.next};
+   });
+   if (positions) setLimit(value=>value+100);
+  } catch(error) {
+   if (revision===searchRevision.current) setSearchError(error instanceof Error?error.message:'Full mailbox search could not complete.');
+  } finally {
+   if (revision===searchRevision.current) setSearchBusy(false);
+  }
+ }
+ useEffect(()=>{
+  const revision=++searchRevision.current;
+  setSearchBusy(false);
+  setSearchError('');
+  if (!liveToken||!activeSearch) return;
+  const timeout=window.setTimeout(()=>void searchOlder(activeSearch,revision),300);
+  return ()=>window.clearTimeout(timeout);
+ },[activeSearch,liveToken]);
  const currentRow=row&&list.some(m=>m.id===row.id)?row:undefined;
  const related=currentRow?threadFor(mail,currentRow) as Message[]:[];
  const newest=related.filter(m=>m.id!==currentRow?.id);
@@ -320,7 +359,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   return <div className="body">{result.html?<RichMail key={message.id} html={result.html} images={result.images} dark={theme==='dark'}/>:<MessageText body={result.body}/>}{result.truncated&&<p className="message-note">The text body is too long to display in full. Open this message in IONOS Webmail to read the rest.</p>}</div>;
  }
 
- function go(next:string){if(next==='Drafts')void syncPreferences();setNav(next);setQuery('');setFilter('All mail');setProjectFilter('');setMarked([]);setMenu('');setMobileRead(false);setSide(false);setLimit(60)}
+ function go(next:string){if(next==='Drafts')void syncPreferences();setNav(next);setQuery('');setFilter('All mail');setProjectFilter('');setMarked([]);setMenu('');setMobileRead(false);setSide(false);setLimit(liveToken&&next==='Inbox'?200:60)}
  async function change(ids:string[],patch:Partial<Message>) {
   if (liveToken) {
    const action=patch.folder?'move':patch.unread!==undefined?(patch.unread?'unread':'read'):(patch.star?'star':'unstar');
@@ -740,13 +779,20 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     aria-label={'Move to Trash: '+m.subject} onClick={()=>void move([m.id],'Trash')}><Trash2 size={16}/></button>}
  </div>}
  </div>):<div className="empty">No messages match this view.</div>}
- {list.length>limit&&<button className="load" onClick={()=>setLimit(limit+60)}>Load more messages</button>}</div>
+ {list.length>limit&&<button className="load" onClick={()=>setLimit(limit+60)}>Show more loaded messages</button>}
+ {activeSearch&&liveToken&&<>
+  {searchBusy&&<p role="status">Searching IONOS across all folders…</p>}
+  {searchError&&<p role="alert">{searchError}</p>}
+  {!searchBusy&&mailSearch.query===activeSearch&&mailSearch.next.length>0&&<button className="load"
+   onClick={()=>void searchOlder(activeSearch,searchRevision.current,mailSearch.next)}>Fetch more matching messages</button>}
+ </>}</div>
  <footer className="list-footer">{nav==='Drafts'&&!query?draftList.length+' drafts':list.length+' messages'} <span>•</span> {liveToken?connection:'Local sandbox'}</footer>
  </section>
  <section className="reader">{currentRow?<><div className="reader-tools"><button className="icon back" title="Back to messages" onClick={()=>setMobileRead(false)}><ChevronLeft size={19}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Archive" onClick={()=>move([currentRow.id],'Archive')}><Archive size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.folder==='Trash'?'Delete forever':'Move to Trash'} onClick={()=>currentRow.folder==='Trash'?setDeleteTarget(currentRow):void move([currentRow.id],'Trash')}><Trash2 size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.unread?'Mark read':'Mark unread'} onClick={()=>change([currentRow.id],{unread:!currentRow.unread})}>{currentRow.unread?<MailOpen size={18}/>:<Mail size={18}/>}</button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Move message" onClick={()=>setMenu(menu==='move'?'':'move')}><MoreHorizontal size={20}/></button>{currentRow.folder!=='Inbox'&&currentRow.folder!=='Sent'&&<button className="icon" title="Restore message" onClick={()=>move([currentRow.id],currentRow.previousFolder==='Sent'?'Sent':'Inbox')}><RotateCcw size={17}/></button>}{menu==='move'&&<div className="popover move">{['Inbox','Sent','Archive','Trash','Spam'].filter(f=>f!==currentRow.folder).map(f=><button key={f} onClick={()=>move([currentRow.id],f)}>Move to {f}</button>)}</div>}<span className="tool-space"/><span className="position">{list.findIndex(m=>m.id===currentRow.id)+1} of {list.length}</span><button className="icon next" title="Previous message" disabled={list[0]===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)-1];if(p)open(p)}}><ChevronLeft size={18}/></button><button className="icon next next-right" title="Next message" disabled={list.at(-1)===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)+1];if(p)open(p)}}><ChevronLeft size={18}/></button></div>
  <div className="reader-scroll"><div className="reader-content"><div className="subject-line"><h2>{currentRow.subject}</h2><button className={'star '+(currentRow.star?'starred':'')} disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Toggle message star" onClick={()=>change([currentRow.id],{star:!currentRow.star})}><Star size={20}/></button></div><div className="reader-tags">{tag(currentRow)}{project&&<button className="project-tag" onClick={()=>{go('Active Projects');setProjectFilter(project.id)}}><FolderKanban size={13}/>{project.name}</button>}</div>
  <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}{currentRow.folder==='Sent'&&currentRow.bcc&&' · Bcc: '+currentRow.bcc}</small></div><MessageTimestamp value={currentRow.date}/></div>
  {mailFeatures.askAi&&!currentRow.id.startsWith('out-')&&<AskAi key={currentRow.id} subject={currentRow.subject} ask={(question,history)=>liveRequest('ask-ai',{id:currentRow.id,question,history})}/>}
+ {onSignOut&&liveToken&&currentRow.folder==='Inbox'&&<QualifiedBids key={currentRow.id} token={liveToken} message={currentRow.id}/>}
  {renderAttachments([currentRow,...newest.slice().reverse()])}
  {currentRow.due&&<div className="deadline"><div className="deadline-icon"><Clock3 size={19}/></div><div><b>Bid submission deadline</b><span>{day(currentRow.due+'T12:00:00')}</span></div><span className="tag gold">Open bid</span></div>}
  {renderBody(currentRow)}
