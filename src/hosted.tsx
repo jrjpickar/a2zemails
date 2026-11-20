@@ -11,7 +11,8 @@ export async function hostedRequest(action:string, body?:object, token?:string, 
  });
  const data = await response.json().catch(()=>({}));
  if (!response.ok||data.error) {
-  const error=new Error(data.error||'IONOS request failed.');
+  const error=new Error(data.error||(response.status===429?'Too many mailbox requests. Wait a moment and try again.':
+   response.status===502||response.status===503||response.status===504?'The mailbox service did not complete the request. Try again.':'IONOS request failed.'));
   Object.assign(error,{status:response.status,reason:data.reason,requestId:response.headers.get('x-nf-request-id')});
   throw error;
  }
@@ -45,6 +46,7 @@ export function MailboxLogin({ready,onLogin,notice,retry}:{ready:boolean;onLogin
   <header><b>A2Z Construction</b><span>IONOS Mail</span></header>
   <div className="signature-fields">
    <h1>Sign in to your mailbox</h1>
+   <a className="project-tag" href="?sandbox=1">Open sandbox</a>
    {notice&&<p role="status">{notice}</p>}
    {retry&&<button type="button" className="project-tag" onClick={retry}>Try HighLevel sign-in again</button>}
    <label>IONOS email address<input name="email" type="email" autoComplete="username" inputMode="email" autoCapitalize="none" autoCorrect="off" spellCheck={false} required disabled={!ready||busy}/></label>

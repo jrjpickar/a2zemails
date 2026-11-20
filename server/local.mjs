@@ -51,8 +51,15 @@ const server = createServer(async(req,res)=>{
  try {
   if (path.startsWith('/api/ionos/')) {
    if (!authorized(req)) return json(res,403,{error:'Reload the local IONOS app to start a session.'});
+   if (path==='/api/ionos/mail-export-folders' && req.method==='GET') return json(res,200,{folders:await mailbox.exportFolders()});
+   if (path==='/api/ionos/mail-export-page' && req.method==='POST' && req.headers['content-type']==='application/json') {
+    const input=await readJson(req,8192);
+    const data=await mailbox.exportPage(input);
+    if (data.resetRequired) return json(res,409,{error:'An IONOS folder changed during the export. Restart the export.'});
+    return json(res,200,await mailboxTemperatures(data,input?.temperature===true?temperature:null));
+   }
    if (path==='/api/ionos/mail-search' && req.method==='POST' && req.headers['content-type']==='application/json') {
-    const result=await mailbox.mailSearch(await readJson(req,512000));
+    const result=await mailbox.searchMailboxPage(await readJson(req,512000));
     if (result.resetRequired) return json(res,409,{error:'This folder changed. Start a new search.'});
     return json(res,200,result);
    }
@@ -61,7 +68,7 @@ const server = createServer(async(req,res)=>{
     return json(res,200,{...data,askAi:aiEnabled(ai)});
    }
    if (path==='/api/ionos/ask-ai' && req.method==='POST' && req.headers['content-type']==='application/json') {
-    const {status,data}=await askEmail(ai,mailbox,await readJson(req,96000));
+    const {status,data}=await askEmail(ai,mailbox,await readJson(req,96000),fetch,{resilient:true});
     return json(res,status,data);
    }
    if (path==='/api/ionos/body' && req.method==='POST' && req.headers['content-type']==='application/json') {

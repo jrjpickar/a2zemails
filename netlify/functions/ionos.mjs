@@ -219,9 +219,17 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const {status,...result}=await inspectBidEmail({email:login.email,id:input?.id,mailbox,env});
     return reply(result,status);
    }
+   if (action==='mail-export-folders' && request.method==='GET') return reply({folders:await mailbox.exportFolders()});
+   if (action==='mail-export-page' && request.method==='POST') {
+    const input=await readInput(request,8192);
+    const data=await mailbox.exportPage(input);
+    if (data.resetRequired) return reply({error:'An IONOS folder changed during the export. Restart the export.'},409);
+    const sameLocation=temperature&&(!session.highLevel||session.highLevel.activeLocation===temperature.locationId);
+    return reply(await mailboxTemperatures(data,input?.temperature===true&&sameLocation?temperature:null));
+   }
    if (action==='mail-search' && request.method==='POST') {
     const input=await readInput(request,512000);
-    const result=await mailbox.mailSearch(input);
+    const result=await mailbox.searchMailboxPage(input);
     if (result.resetRequired) return reply({error:'This folder changed. Start a new search.'},409);
     return reply(result);
    }
@@ -231,7 +239,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     return reply({...data,askAi:aiEnabled(ai)});
    }
    if (action==='ask-ai' && request.method==='POST') {
-    const {status,data}=await askEmail(ai,mailbox,await readInput(request,96000));
+    const {status,data}=await askEmail(ai,mailbox,await readInput(request,96000),fetch,{resilient:true});
     return reply(data,status);
    }
    if (action==='body' && request.method==='POST') {
@@ -302,6 +310,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     if (error instanceof TypeError) return reply({error:error.message},400);
     return reply({error:action==='upload'?'The file could not upload. Try attaching it again.':'Mailbox drafts or signatures could not sync. Try again.'},502);
    }
+   if (action==='mail-search'&&error instanceof TypeError) return reply({error:error.message},400);
    if (error instanceof TypeError) return reply({error:action==='send'?error.message:'Check your mailbox settings or message fields.'},400);
    if (error.authenticationFailed || error.code==='EAUTH' || error.serverResponseCode==='AUTHENTICATIONFAILED') {
     if (session?.highLevel) {
@@ -311,6 +320,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     if (action==='login') console.warn('[IONOS] Direct sign-in credentials rejected by the mail server.');
     return reply({error:mailboxSignInError},401);
    }
+   if (action==='mail-search') return reply({error:'IONOS search could not connect. Recent matches are still available. Retry the mailbox search.'},503);
    if (session?.highLevel && action==='mail') {
     console.warn('[IONOS] HighLevel session accepted; mailbox connection failed.');
     return reply({error:'HighLevel signed you in, but Inbox could not open the IONOS mailbox.',reason:'ghl_ionos_unavailable'},502);

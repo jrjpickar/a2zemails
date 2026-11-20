@@ -1,3 +1,4 @@
+import {dateOnly,searchTerms} from '../src/mail-search-scope.mjs';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import nodemailer from 'nodemailer';
@@ -59,8 +60,23 @@ function bidDue(subject, body) {
  return !Number.isNaN(candidate.getTime()) && candidate.toISOString().startsWith(match[1]) ? match[1] : undefined;
 }
 
-function searchCriteria(query) {
- const terms=(query.match(/(?:[^\s"]+|"[^"]*")+/g)||[]).slice(0,16);
+function searchScope(input) {
+ if (input===undefined) return {};
+ if (!input||typeof input!=='object'||Array.isArray(input)) throw new TypeError('Invalid search filters.');
+ const {folder,field,fromDate,toDate}=input;
+ if ((folder!==undefined&&(typeof folder!=='string'||folder.length>1024||/[\x00-\x1f\x7f]/.test(folder)))||
+     (field!==undefined&&!['text','subject','from','body'].includes(field))) throw new TypeError('Invalid search filters.');
+ const since=fromDate===undefined?null:dateOnly(fromDate);
+ const end=toDate===undefined?null:dateOnly(toDate);
+ if (fromDate!==undefined&&!since||toDate!==undefined&&!end||since&&end&&since>end) {
+  throw new TypeError('Choose a valid date range. The end date must be on or after the start date.');
+ }
+ const before=end?new Date(end.getTime()+86400000):null;
+ return {folder,field,since,before};
+}
+
+function searchCriteria(query,scope={}) {
+ const terms=searchTerms(query).slice(0,16);
  const criteria=[];
  const attachments=[];
  for (const term of terms) {
@@ -73,11 +89,12 @@ function searchCriteria(query) {
    criteria.push({on:new Date(value+'T12:00:00Z')});continue;
   }
   if (field==='to') {criteria.push({or:[{to:value},{cc:value}]});continue;}
-  criteria.push(field==='from'||field==='subject'?{[field]:value}:{text:value});
+  const key=field==='from'||field==='subject'?field:field?'text':scope.field||'text';
+  criteria.push({[key]:value});
  }
  // IMAP keys are ANDed. De Morgan's law preserves repeated fields such as two text terms.
  const filter=criteria.length>1?{not:{or:criteria.map(value=>({not:value}))}}:criteria[0]||{all:true};
- return {filter,attachments};
+ return {filter:{...filter,...(scope.since?{since:scope.since}:{}),...(scope.before?{before:scope.before}:{})},attachments};
 }
 
 const detailLimit = 1024 * 1024;
@@ -234,8 +251,8 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   return {email:config.email,folders:[...new Set(folders.map(folderName))],contacts:[...contacts.values()],mail:mail.sort((a,b)=>b.date.localeCompare(a.date))};
  }
 
- async function readConnection(operation) {
-  const imap=new Imap(config.imap);
+ async function readConnection(operation,options={}) {
+  const imap=new Imap({...config.imap,...options});
   imap.on?.('error',()=>{});
   try {await imap.connect();return await operation(imap);}
   finally {imap.close();}
@@ -353,19 +370,51 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     return {uidValidity,highWaterUid,messages,hasMore,next:hasMore?edge:null};
    });
   },
-  async mailSearch(input,limit=40,anyTerm=false) {
+  exportFolders() {
+   return readConnection(async imap=>(await imap.list()).filter(isMailFolder).map(entry=>({path:entry.path,folder:folderName(entry)})));
+  },
+  async exportPage(input) {
+   if (typeof input?.path!=='string'||!input.path||input.path.length>1024) throw new TypeError('Select a mailbox folder.');
+   const result=await mailbox.mailSearch(input,12,false,input.path);
+   if (result.resetRequired) return result;
+   let bytes=0;
+   let count=0;
+   for (const row of result.mail) {
+    const estimate=Math.min(row.messageBytes||0,detailLimit);
+    if (count&&bytes+estimate>2*1024*1024) break;
+    bytes+=estimate;
+    count++;
+   }
+   const page=result.mail.slice(0,count);
+   const mail=await Promise.all(page.map(async row=>{
+    const message=await mailbox.body(row.id,{includeHtml:false,includeImages:false});
+    if (!message) return {...row,bodyStatus:'Message no longer available'};
+    const body=message.body||'';
+    const category=classify(row.subject,body,row.from);
+    return {...row,body,category,project:matchProject(row.subject+' '+body),
+     due:category==='Bid Invitations'?bidDue(row.subject,body):undefined,
+     bodyStatus:message.truncated?'Truncated by mailbox body limit':'Complete'};
+   }));
+   const consumed=page.at(-1)?.id.match(/:(\d+):(\d+)$/);
+   const next=count<result.mail.length&&consumed
+    ? [{path:input.path,generation:consumed[1],before:Number(consumed[2])}] : result.next;
+   return {mail,next};
+  },
+  async mailSearch(input,limit=40,anyTerm=false,exportPath,windowSize=0) {
    const {query,positions}=input||{};
-   if (typeof query!=='string'||!query.trim()||query.length>512||/[\x00-\x1f\x7f]/.test(query)||
+   if (typeof query!=='string'||(!exportPath&&!query.trim())||query.length>512||/[\x00-\x1f\x7f]/.test(query)||
        (positions!==undefined&&(!Array.isArray(positions)||positions.length>2000||
         positions.some(cursor=>typeof cursor?.path!=='string'||typeof cursor.generation!=='string'||
          !Number.isSafeInteger(cursor.before)||cursor.before<2||cursor.before>4294967296)))) {
     throw new TypeError('Invalid mailbox search.');
    }
-   const {filter,attachments:attachmentTerms}=searchCriteria(query);
+   const scope=searchScope(input?.scope);
+   const {filter,attachments:attachmentTerms}=searchCriteria(query,scope);
    const keywords=anyTerm?query.split(' ').filter(Boolean):[];
    const criteria=keywords.length>1?{or:keywords.map(text=>({text}))}:filter;
    return readConnection(async imap=>{
-    const folders=(await imap.list()).filter(isMailFolder);
+    const folders=(await imap.list()).filter(entry=>isMailFolder(entry)&&(!exportPath||entry.path===exportPath)&&(!scope.folder||folderName(entry)===scope.folder));
+    if(exportPath&&!folders.length) return {resetRequired:true};
     const cursors=positions?new Map(positions.map(cursor=>[cursor.path,cursor])):null;
     const mail=[],next=[];
     for (const entry of folders) {
@@ -378,10 +427,25 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
       const before=cursor?.before??Number(imap.mailbox.uidNext);
       if (!Number.isSafeInteger(before)||before<1) throw new Error('IONOS search is missing a UID checkpoint.');
       if (before===1) continue;
-      const matches=await imap.search({...criteria,uid:'1:'+(before-1),deleted:false},{uid:true});
-      const uids=(matches||[]).filter(uid=>uid<before).sort((a,b)=>b-a);
+      const low=windowSize?Math.max(1,before-windowSize):1;
+      const matches=await imap.search({...criteria,uid:low+':'+(before-1),deleted:false},{uid:true});
+      if (matches===false) throw new Error('IONOS search did not complete.');
+      const uids=matches.filter(uid=>uid>=low&&uid<before).sort((a,b)=>b-a);
       const page=uids.slice(0,limit);
-      if (uids.length>page.length) next.push({path:entry.path,before:page.at(-1),generation});
+      let nextBefore=uids.length>page.length?page.at(-1):low;
+      // If the current window has no matches, use the IMAP date index to
+      // avoid paging through older messages outside the selected range.
+      if (!uids.length&&scope.since&&windowSize&&low>1) {
+       const older=await imap.search({
+        since:scope.since,...(scope.before?{before:scope.before}:{}),uid:'1:'+(low-1),deleted:false,
+       },{uid:true});
+       if (older!==false) {
+        let last=0;
+        for (const uid of older) if (uid<low&&uid>last) last=uid;
+        nextBefore=last+1;
+       }
+      }
+      if (nextBefore>1) next.push({path:entry.path,before:nextBefore,generation});
       if (!page.length) continue;
       const rows=await imap.fetchAll(page,{uid:true,envelope:true,internalDate:true,flags:true,bodyStructure:true},{uid:true});
       const folder=folderName(entry);
@@ -397,14 +461,55 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
         from:item.from,to:item.to,cc:item.cc,bcc:folder==='Sent'?item.bcc:'',category,project:matchProject(item.subject),folder,
         unread:!item.flags.includes('\\Seen'),star:item.flags.includes('\\Flagged'),
         files:item.attachments.map(file=>file.name),attachments:item.attachments,
+        ...(exportPath?{messageBytes:item.bytes}:{}),
         due:category==='Bid Invitations'?bidDue(item.subject,''):undefined,
         headers:{messageId:item.messageId,references},
        });
       }
      } finally {lock.release();}
     }
-    return {mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),next};
-   });
+    return {mail:mail.sort(exportPath?(a,b)=>Number(b.id.split(':').at(-1))-Number(a.id.split(':').at(-1)):(a,b)=>b.date.localeCompare(a.date)),next};
+   },windowSize?{connectionTimeout:5000,greetingTimeout:5000,socketTimeout:6500}:undefined);
+  },
+  async searchMailboxPage(input) {
+   const {query,positions}=input||{};
+   if (typeof query!=='string'||!query.trim()||query.length>512||/[\x00-\x1f\x7f]/.test(query)||
+       (positions!==undefined&&(!Array.isArray(positions)||positions.length>2000||
+        positions.some(cursor=>typeof cursor?.path!=='string'||!cursor.path||cursor.path.length>1024||
+         /[\x00-\x1f\x7f]/.test(cursor.path)||!(cursor.before===null&&cursor.generation===null||
+          Number.isSafeInteger(cursor.before)&&cursor.before>=2&&cursor.before<=4294967296&&
+          typeof cursor.generation==='string'&&/^\d{1,20}$/.test(cursor.generation)))))) {
+    throw new TypeError('Enter a mailbox search of up to 512 characters.');
+   }
+   const scope=searchScope(input?.scope);
+   let queue=positions;
+   if (!queue) {
+    const folders=await readConnection(async imap=>(await imap.list()).filter(entry=>isMailFolder(entry)&&(!scope.folder||folderName(entry)===scope.folder)),{
+     connectionTimeout:5000,greetingTimeout:5000,socketTimeout:6500,
+    });
+    const priority=entry=>folderName(entry)==='Inbox'?0:folderName(entry)==='Archive'?1:2;
+    queue=folders.sort((a,b)=>priority(a)-priority(b)).map(({path})=>({path,before:null,generation:null}));
+   }
+   const batch=queue.slice(0,3);
+   const remaining=queue.slice(3);
+   const mail=[],failed=[];
+   const results=await Promise.allSettled(batch.map(cursor=>mailbox.mailSearch({
+    query,scope:input.scope,positions:cursor.before===null?undefined:[cursor],
+   },40,false,cursor.path,4096)));
+   for (const [index,result] of results.entries()) {
+    const cursor=batch[index];
+    if (result.status==='fulfilled'&&!result.value.resetRequired) {
+     mail.push(...result.value.mail);
+     remaining.push(...result.value.next);
+    } else {
+     if (result.status==='rejected'&&(result.reason?.authenticationFailed||result.reason?.code==='EAUTH'||
+         result.reason?.serverResponseCode==='AUTHENTICATIONFAILED')) throw result.reason;
+     const retry=result.status==='fulfilled'?{path:cursor.path,before:null,generation:null}:cursor;
+     remaining.push(retry);
+     failed.push(cursor.path);
+    }
+   }
+   return {mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),next:remaining,failed,deferred:queue.length>batch.length};
   },
   async messageInfo(id,includeHeaders=false) {
    const match=messageLocation(id);

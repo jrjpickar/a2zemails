@@ -1,4 +1,7 @@
 /// <reference types="vite/client" />
+import {scopedMailMatches,searchTerms} from './mail-search-scope.mjs';
+import {SearchFilters,defaultSearchFilters,type SearchFiltersValue} from './search-filters';
+import {downloadMailCsv,mailCsvHeader,mailCsvRows} from './mail-csv.mjs';
 import React,{useEffect,useMemo,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {LayoutDashboard,ClipboardList,FolderKanban,Calculator,FileQuestion,HardHat,Receipt,Inbox,Send,FileText,Archive,Trash2,ShieldAlert,Plus,Search,SlidersHorizontal,PanelLeft,ChevronDown,ChevronLeft,Star,Paperclip,Reply,ReplyAll,Forward,MoreHorizontal,ArrowUpRight,Mail,Clock3,X,Check,Download,RotateCcw,MailOpen,Menu,ArrowRight,Moon,Palette,Settings2} from 'lucide-react';
@@ -17,7 +20,7 @@ import './style.css';
 import './theme.css';
 const temperatures=[['cold','Cold'],['warm','Warm'],['hot','Hot'],['vip','VIP']] as const;
 type Temperature=typeof temperatures[number][0];
-type SearchCursor={path:string;before:number;generation:string};
+type SearchCursor={path:string;before:number|null;generation:string|null};
 type Message={id:string;temperature?:Temperature;thread:string;name:string;company:string;subject:string;date:string;body:string;sentSignatureImage?:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
 type Upload={name:string;data:string;size?:number};
 type StagedUpload={id:string;name:string;size:number};
@@ -73,8 +76,9 @@ function getState(liveToken?:string):State {
  } catch {}
  return initialState() as State;
 }
-async function localRequest(path:string, body?:object) {
+async function localRequest(path:string, body?:object, signal?:AbortSignal) {
  const response = await fetch('/api/ionos/'+path, {
+  signal,
   method:body?'POST':'GET',
   headers:{'X-A2Z-Session':localToken||'', ...(body?{'Content-Type':'application/json'}:{})},
   body:body?JSON.stringify(body):undefined,
@@ -104,9 +108,9 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   const result=await hostedRequest('contacts',{query},liveToken,signal);
   return result.contacts||[];
  },[liveToken]);
- async function liveRequest(path:string, body?:object) {
-  if (!onSignOut) return localRequest(path,body);
-  try { return await hostedRequest(path,body,liveToken); }
+ async function liveRequest(path:string, body?:object, signal?:AbortSignal) {
+  if (!onSignOut) return localRequest(path,body,signal);
+  try { return await hostedRequest(path,body,liveToken,signal); }
   catch (error) {
    const failure=error as {status?:number;reason?:string};
    if (failure.status===401 || failure.reason==='ghl_ionos_unavailable') void onSignOut(error).catch(()=>setToast('Your session ended. Reload to sign in again.'));
@@ -154,7 +158,9 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const [mailSearch,setMailSearch]=useState<{query:string;mail:Message[];next:SearchCursor[]}>({query:'',mail:[],next:[]});
  const [searchBusy,setSearchBusy]=useState(false);
  const [searchError,setSearchError]=useState('');
+ const [searchFilters,setSearchFilters]=useState<SearchFiltersValue>(defaultSearchFilters);
  const searchRevision=React.useRef(0);
+ const searchAbort=React.useRef<AbortController|null>(null);
  const refreshing = React.useRef<Promise<void>|null>(null);
  const mailboxRevision = React.useRef(0);
  const moving = React.useRef(new Set<string>());
@@ -210,7 +216,6 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   if (hosted) void syncPreferences();
  },[account,hosted,liveToken]);
  const mail=state.mail;
- const row=mail.find(m=>m.id===selected)||(mailSearch.query===query.trim()?mailSearch.mail.find(m=>m.id===selected):undefined);
  const draft=state.drafts.find(d=>d.id===compose);
  const composeWindow=useComposePosition(draft?.id);
  const draftPayload=draft?JSON.stringify(draft):'';
@@ -263,6 +268,11 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
 
  const openDrafts=state.drafts.filter(item=>item.id!==draft?.id||shouldSaveDraft);
  const draftList=hosted?[...openDrafts,...savedDrafts.filter(item=>!openDrafts.some(open=>open.id===item.id))]:openDrafts;
+ const [allSelected,setAllSelected]=useState(false);
+ const [exportCount,setExportCount]=useState<number|null>(null);
+ const stopExport=React.useRef(false);
+ const exportRunning=React.useRef(false);
+
  const inbox=mail.filter(m=>m.folder==='Inbox');
  const unreadIncoming=inbox.filter(m=>m.unread).length;
  const queues=dashboardQueues(mail) as Record<'bids'|'urgent'|'unanswered'|'invoices',Message[]>;
@@ -273,6 +283,26 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const temperaturePrefix='temperature:';
  const temperatureName=temperatures.find(([value])=>nav===temperaturePrefix+value)?.[1];
  const viewName=temperatureName||(nav.startsWith(customFolderPrefix)?nav.slice(customFolderPrefix.length):nav);
+ const physicalFolders:string[]=[...new Set([...groups[1].links.map(([name])=>name).filter(name=>name!=='Drafts'),...mailFolders])];
+ const currentSearchFolder=temperatureName?'Inbox':physicalFolders.includes(viewName)?viewName:undefined;
+ const selectedSearchFolder=searchFilters.folder==='current'?currentSearchFolder:
+  searchFilters.folder.startsWith('folder:')?searchFilters.folder.slice(7):undefined;
+ const relativeStart=new Date();
+ if (searchFilters.period!=='any'&&searchFilters.period!=='custom') {
+  relativeStart.setDate(relativeStart.getDate()-(Number(searchFilters.period)-1));
+ }
+ const fromDate=searchFilters.period==='custom'?searchFilters.start||undefined:
+  searchFilters.period==='any'?undefined:
+  new Date(relativeStart.getTime()-relativeStart.getTimezoneOffset()*60000).toISOString().slice(0,10);
+ const scope={folder:selectedSearchFolder,field:searchFilters.field,fromDate,
+  toDate:searchFilters.period==='custom'?searchFilters.end||undefined:undefined};
+ const activeSearch=query.trim();
+ const searchKey=JSON.stringify([activeSearch,scope]);
+ const row=mail.find(m=>m.id===selected)||(mailSearch.query===searchKey?mailSearch.mail.find(m=>m.id===selected):undefined);
+ const searchScopeLabel=[scope.folder||'All folders',searchFilters.period==='any'?'Any time':searchFilters.period==='custom'?
+  (scope.fromDate||'Any start')+' to '+(scope.toDate||'Any end'):'Last '+searchFilters.period+' days',
+  {text:'Headers and body',from:'Sender',subject:'Subject',body:'Message body'}[scope.field]].join(' · ');
+ useEffect(()=>{setAllSelected(false);stopExport.current=true;},[nav,query,filter,projectFilter,searchKey]);
  function inFolder(message:Message, folder:string) {
   if (folder.startsWith(temperaturePrefix)) return message.folder==='Inbox'&&message.temperature===folder.slice(temperaturePrefix.length);
   if (folder.startsWith(customFolderPrefix)) return message.folder===folder.slice(customFolderPrefix.length);
@@ -280,37 +310,64 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   if (categories.includes(folder)) return message.category===folder&&!['Trash','Spam'].includes(message.folder);
   return message.folder===folder;
  }
+ async function askAboutMail(id:string|undefined,question:string,history:object[]) {
+  if (liveToken) return liveRequest('ask-ai',{id,question,history});
+  const chosen=mail.find(item=>item.id===id)||mail.find(item=>searchMail(item,question));
+  return {answer:chosen?chosen.subject+'\n\n'+chosen.body:'Select a sample email to see sandbox excerpts.',
+   provider:'Sandbox' as const,excerptsOnly:true};
+ }
  const localList=useMemo(()=>mail.filter(m=>{
-  if(query.trim())return searchMail(m,query);
+  if (activeSearch) return scopedMailMatches(m,scope)&&searchTerms(activeSearch).every((term:string)=>{
+   if (scope.field==='text'||/^(from|to|subject|project|date|attachment):/i.test(term)) return searchMail(m,term);
+   const value=scope.field==='from'?m.from+' '+m.name:scope.field==='subject'?m.subject:m.body;
+   return value.toLowerCase().includes(term.replaceAll('"','').toLowerCase());
+  });
   const inView=inFolder(m,nav);
   return inView&&(!projectFilter||m.project===projectFilter)&&(filter==='All mail'||(filter==='Unread'&&m.unread)||(filter==='Starred'&&m.star)||(filter==='Attachments'&&m.files.length>0)||(filter==='Incoming'&&m.folder==='Inbox'&&m.unread)||(filter==='Urgent'&&queues.urgent.some(item=>item.id===m.id)));
- }).sort((a,b)=>b.date.localeCompare(a.date)),[mail,nav,query,projectFilter,filter]);
+ }).sort((a,b)=>b.date.localeCompare(a.date)),[mail,nav,activeSearch,searchKey,projectFilter,filter]);
  const unreadCounts=Object.fromEntries(groups.flatMap(group=>group.links.map(([label])=>[
   label,mail.filter(message=>message.unread&&inFolder(message,label)).length
  ])));
- const activeSearch=query.trim();
  const list=useMemo(()=>{
-  if (!activeSearch||mailSearch.query!==activeSearch) return localList;
+  if (!activeSearch||mailSearch.query!==searchKey) return localList;
   const unique=new Map(mailSearch.mail.map(item=>[item.id,item]));
   for (const item of localList) unique.set(item.id,item);
   return [...unique.values()].sort((a,b)=>b.date.localeCompare(a.date));
- },[localList,activeSearch,mailSearch]);
+ },[localList,activeSearch,searchKey,mailSearch]);
  async function searchOlder(term:string,revision:number,positions?:SearchCursor[]) {
+  searchAbort.current?.abort();
+  const controller=new AbortController();
+  searchAbort.current=controller;
   setSearchBusy(true);
   setSearchError('');
+  let cursor=positions;
+  let resultsSeen=0;
+  const failed=new Set<string>();
   try {
-   const data:{mail:Message[];next:SearchCursor[]}=await liveRequest('mail-search',{query:term,positions});
-   if (revision!==searchRevision.current) return;
-   setMailSearch(previous=>{
-    const rows=new Map((positions&&previous.query===term?previous.mail:[]).map(item=>[item.id,item]));
-    for (const item of data.mail) rows.set(item.id,item);
-    return {query:term,mail:[...rows.values()],next:data.next};
-   });
+   for (let page=0;page<4;page++) {
+    const data:{mail:Message[];next:SearchCursor[];failed:string[];deferred:boolean}=await liveRequest(
+     'mail-search',{query:term,scope,positions:cursor},controller.signal);
+    if (revision!==searchRevision.current||controller.signal.aborted) return;
+    setMailSearch(previous=>{
+     const rows=new Map((positions||page)&&previous.query===searchKey?previous.mail.map(item=>[item.id,item]):[]);
+     for (const item of data.mail) rows.set(item.id,item);
+     return {query:searchKey,mail:[...rows.values()],next:data.next};
+    });
+    for (const path of data.failed||[]) failed.add(path);
+    resultsSeen+=data.mail.length;
+    cursor=data.next;
+    if (!cursor.length||positions||failed.size&&!data.deferred||(!data.deferred&&resultsSeen)) break;
+   }
    if (positions) setLimit(value=>value+100);
+   if (failed.size) setSearchError('Some folders did not respond. Use Fetch more matching messages to keep searching.');
   } catch(error) {
-   if (revision===searchRevision.current) setSearchError(error instanceof Error?error.message:'Full mailbox search could not complete.');
+   if (revision!==searchRevision.current||controller.signal.aborted) return;
+   const status=(error as {status?:number}|null)?.status;
+   setSearchError(status===429?'Too many searches at once. Wait a moment, then retry.':
+    status===502||status===503||status===504?'IONOS search did not finish. The results already loaded are still available.':
+    error instanceof Error?error.message:'Full mailbox search could not complete.');
   } finally {
-   if (revision===searchRevision.current) setSearchBusy(false);
+   if (revision===searchRevision.current&&!controller.signal.aborted) setSearchBusy(false);
   }
  }
  useEffect(()=>{
@@ -318,9 +375,79 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   setSearchBusy(false);
   setSearchError('');
   if (!liveToken||!activeSearch) return;
-  const timeout=window.setTimeout(()=>void searchOlder(activeSearch,revision),300);
-  return ()=>window.clearTimeout(timeout);
- },[activeSearch,liveToken]);
+  const timeout=window.setTimeout(()=>void searchOlder(activeSearch,revision),500);
+  return ()=>{window.clearTimeout(timeout);searchAbort.current?.abort();};
+ },[activeSearch,searchKey,liveToken]);
+ async function exportSelection(dashboard=false) {
+  if (exportRunning.current) return;
+  exportRunning.current=true;
+  stopExport.current=false;
+  setExportCount(0);
+  const parts=[mailCsvHeader];
+  let count=0;
+  const draftsView=nav==='Drafts'&&!activeSearch&&!dashboard;
+  function append(rows:Message[]) {
+   parts.push(mailCsvRows(rows));
+   count+=rows.length;
+   setExportCount(count);
+  }
+  const selection=activeSearch?list:localList;
+  const matches=(message:Message)=>activeSearch||dashboard||(
+   inFolder(message,nav)&&(!projectFilter||message.project===projectFilter)&&
+   (filter==='All mail'||(filter==='Unread'&&message.unread)||(filter==='Starred'&&message.star)||
+    (filter==='Attachments'&&message.files.length>0)||(filter==='Incoming'&&message.folder==='Inbox'&&message.unread)||
+    (filter==='Urgent'&&dashboardQueues([message]).urgent.length>0))
+  );
+  try {
+   if (draftsView) {
+    for (const draft of draftList) {
+     if (stopExport.current) return;
+     const local=state.drafts.find(item=>item.id===draft.id);
+     const details=local||(hosted?await liveRequest('draft&id='+encodeURIComponent(draft.id)):null);
+     if (!details) throw new Error('A draft is unavailable. Refresh drafts and try again.');
+     const {to,cc,bcc,subject,body,id}=details;
+     append([{id,subject,to,cc,bcc,body,folder:'Drafts',from:details.identity||account||demo,date:'updatedAt' in draft?draft.updatedAt:'',
+      files:[...(details.files||[]),...(details.attachments||[]).map((item:Upload)=>item.name),
+       ...(details.stagedAttachments||[]).map((item:StagedUpload)=>item.name),
+       ...(details.forwardedAttachments||[]).map((item:ForwardedAttachment)=>item.name),
+       ...(details.largeFiles||[]).map((item:LargeFile)=>item.name)],
+      unread:false,star:false} as Message]);
+    }
+   } else if (!liveToken) append(dashboard?inbox:selection);
+   else {
+    const {folders}:{folders:{path:string;folder:string}[]}=await liveRequest('mail-export-folders');
+    const chosen=folders.filter(item=>{
+     if (activeSearch&&!dashboard) return !scope.folder||item.folder===scope.folder;
+     if (dashboard||temperatureName) return item.folder==='Inbox';
+     if (nav==='Active Projects'||categories.includes(nav)) return true;
+     return item.folder===viewName;
+    });
+    const currentById=new Map(mail.map(item=>[item.id,item]));
+    for (const folder of chosen) {
+     let positions:SearchCursor[]|undefined;
+     do {
+      if (stopExport.current) return;
+      const data:{mail:Message[];next:SearchCursor[]}=await liveRequest('mail-export-page',{
+       path:folder.path,query:dashboard?'':activeSearch,positions,temperature:!activeSearch&&Boolean(temperatureName),
+       scope:activeSearch&&!dashboard?scope:undefined,
+      });
+      if (stopExport.current) return;
+      append(data.mail.map(item=>{
+       const current=currentById.get(item.id);
+       return current?{...item,category:current.category,project:current.project,due:current.due}:item;
+      }).filter(matches));
+      positions=data.next;
+      if (positions.length) await new Promise(resolve=>setTimeout(resolve,1200));
+     } while(positions.length);
+    }
+   }
+   if (!stopExport.current) {
+    downloadMailCsv(parts,dashboard?'Inbox':activeSearch?'Search':viewName);
+    setToast('Exported '+count+' email'+(count===1?'':'s')+'.');
+   }
+  } catch(error) {setToast(error instanceof Error?error.message:'CSV export could not complete.');}
+  finally {exportRunning.current=false;setExportCount(null);}
+ }
  const currentRow=row&&list.some(m=>m.id===row.id)?row:undefined;
  const related=currentRow?threadFor(mail,currentRow) as Message[]:[];
  const newest=related.filter(m=>m.id!==currentRow?.id);
@@ -735,11 +862,20 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <div className="sidebar-end"><div className="env"><i/> {liveToken ? connection : 'Sandbox workspace'}</div><div className="profile"><div className="profile-avatar">OP</div><div><b>Operations</b><small>A2Z Construction</small></div><button title="Keyboard shortcuts" onClick={()=>setHelp(true)}><MoreHorizontal size={17}/></button></div></div>
  </aside>
  <main>
- <header className={'topbar'+(mailFeatures.askAi?' topbar-with-ai':'')}><button className="icon nav-toggle" aria-label="Toggle navigation" onClick={()=>setSide(!side)}><Menu size={20}/></button><div className="crumb"><PanelLeft size={16}/> <span>Workspace</span><span className="slash">/</span><b>{query?'Search':viewName}</b></div>{mailFeatures.askAi&&<AskAi key={row?.id} toolbar prefill={query} subject={row?.id.startsWith('out-')?undefined:row?.subject}
-  ask={(question,history)=>liveRequest('ask-ai',{id:row?.id.startsWith('out-')?undefined:row?.id,question,history})}/>}<div className="search"><Search size={17}/><input id="search" placeholder="Search mail, projects, attachments…" value={query} onChange={e=>{setQuery(e.target.value);setMobileRead(false);setLimit(60)}}/>{query?<button className="icon" title="Clear search" onClick={()=>setQuery('')}><X size={14}/></button>:<kbd>/</kbd>}</div><button className="theme-toggle" aria-label={theme==='dark'?'Switch to color mode':'Switch to dark mode'} onClick={()=>setTheme(theme==='dark'?'color':'dark')}>{theme==='dark'?<Moon size={15}/>:<Palette size={15}/>}<span>{theme==='dark'?'Dark mode':'Color mode'}</span></button><button className="demo-pill" onClick={()=>setMenu(menu==='sandbox'?'':'sandbox')}><i/> {liveToken?'IONOS':'Sandbox'} <ChevronDown size={12}/></button>
- {menu==='sandbox'&&<div className="popover sandbox-menu"><b>{liveToken?'IONOS Mail':'Sandbox mode'}</b><p>{liveToken?(account||connection):'Changes stay in this browser.'}</p>{liveToken?<button onClick={()=>void refreshMailbox()}>Refresh mailbox <kbd>⌘⇧R</kbd></button>:<button onClick={receive}><Inbox size={15}/> Simulate incoming mail</button>}<button disabled={!senderIdentities.length} onClick={openSignatures}><Settings2 size={15}/> Email signatures</button><button onClick={()=>{setHelp(true);setMenu('')}}>Keyboard shortcuts</button>{onSignOut&&<button onClick={()=>void onSignOut().catch(error=>setToast(error.message))}>Sign out</button>}</div>}</header>
+ <header className={'topbar'+((mailFeatures.askAi||!liveToken)?' topbar-with-ai':'')}><button className="icon nav-toggle" aria-label="Toggle navigation" onClick={()=>setSide(!side)}><Menu size={20}/></button><div className="crumb"><PanelLeft size={16}/> <span>Workspace</span><span className="slash">/</span><b>{query?'Search':viewName}</b></div>{(mailFeatures.askAi||!liveToken)&&<AskAi key={row?.id} toolbar prefill={query} subject={row?.id.startsWith('out-')?undefined:row?.subject}
+  ask={(question,history)=>askAboutMail(row?.id.startsWith('out-')?undefined:row?.id,question,history)}/>}<div className="search">
+  <button className="icon search-filter-trigger" type="button" title="Search filters" aria-label="Search filters"
+   aria-expanded={menu==='search-filters'} onClick={()=>setMenu(menu==='search-filters'?'':'search-filters')}><SlidersHorizontal size={17}/></button>
+  <input id="search" placeholder="Search mail, projects, attachments…" value={query} onChange={e=>{setQuery(e.target.value);setMobileRead(false);setLimit(60)}}/>{query?<button className="icon" title="Clear search" onClick={()=>setQuery('')}><X size={14}/></button>:<kbd>/</kbd>}</div><button className="theme-toggle" aria-label={theme==='dark'?'Switch to color mode':'Switch to dark mode'} onClick={()=>setTheme(theme==='dark'?'color':'dark')}>{theme==='dark'?<Moon size={15}/>:<Palette size={15}/>}<span>{theme==='dark'?'Dark mode':'Color mode'}</span></button><button className="demo-pill" onClick={()=>setMenu(menu==='sandbox'?'':'sandbox')}><i/> {liveToken?'IONOS':'Sandbox'} <ChevronDown size={12}/></button>
+ {menu==='search-filters'&&<SearchFilters value={searchFilters} onChange={value=>{setSearchFilters(value);setLimit(60);}}
+  folders={physicalFolders} current={currentSearchFolder} onClose={()=>{setMenu('');document.getElementById('search')?.focus();}}/>}
+ {menu==='sandbox'&&<div className="popover sandbox-menu"><b>{liveToken?'IONOS Mail':'Sandbox mode'}</b><p>{liveToken?(account||connection):'Changes stay in this browser.'}</p><a className="project-tag" href={liveToken?'?sandbox=1':location.pathname}>{liveToken?'Open sandbox':'Return to live inbox'}</a>{liveToken?<button onClick={()=>void refreshMailbox()}>Refresh mailbox <kbd>⌘⇧R</kbd></button>:<button onClick={receive}><Inbox size={15}/> Simulate incoming mail</button>}<button disabled={!senderIdentities.length} onClick={openSignatures}><Settings2 size={15}/> Email signatures</button><button onClick={()=>{setHelp(true);setMenu('')}}>Keyboard shortcuts</button>{onSignOut&&<button onClick={()=>void onSignOut().catch(error=>setToast(error.message))}>Sign out</button>}</div>}</header>
  {nav==='Command Center'&&!query?<div className="dashboard">
  <h1>Command Center</h1>
+ <div className="mail-export-toolbar">
+  <button type="button" className="project-tag" disabled={exportCount!==null} onClick={()=>void exportSelection(true)}><Download size={16}/> Export Inbox CSV</button>
+  {exportCount!==null&&<><span role="status">{exportCount} rows ready</span><button type="button" className="project-tag" onClick={()=>{stopExport.current=true}}>Cancel export</button></>}
+ </div>
  <div className="metrics">{([
   [Mail,'Unread incoming',unreadIncoming,'Incoming'],
   [ClipboardList,'Bid invitations',queues.bids.length,'Bid Invitations'],
@@ -761,8 +897,13 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <section className="activity"><h2>Recent activity</h2>{[...mail].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,6).map(m=><button key={m.id} onClick={()=>{go('Inbox');open(m)}}>{tag(m)}<b>{m.subject}</b><span>{m.name}</span><ArrowRight size={16}/></button>)}</section></div>:
  <div className="workspace">
  <section className="message-list">
- <div className="list-head"><div className="eyebrow">{query?'GLOBAL SEARCH':'OPERATIONS MAIL'}</div><h1>{query?'Search results':viewName}</h1><p>{nav==='Inbox'&&!query?'Incoming messages, newest first.':nav==='Drafts'&&!query?'Pick up where you left off.':query?'Search across all mail folders.':nav==='Invoices'?'Invoices, payments, receipts, and purchase orders.':'Manage your construction correspondence.'}</p>
+ <div className="list-head"><div className="eyebrow">{query?'GLOBAL SEARCH':'OPERATIONS MAIL'}</div><h1>{query?'Search results':viewName}</h1><p>{nav==='Inbox'&&!query?'Incoming messages, newest first.':nav==='Drafts'&&!query?'Pick up where you left off.':query?searchScopeLabel:nav==='Invoices'?'Invoices, payments, receipts, and purchase orders.':'Manage your construction correspondence.'}</p>
  {nav==='Active Projects'&&!query&&<select aria-label="Filter by project" value={projectFilter} onChange={e=>setProjectFilter(e.target.value)}><option value="">All projects</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>}</div>
+ <div className="mail-export-toolbar">
+  <label><input type="checkbox" checked={allSelected} onChange={event=>setAllSelected(event.target.checked)} disabled={exportCount!==null}/> Select all in this view</label>
+  <button type="button" className="project-tag" disabled={!allSelected||exportCount!==null} onClick={()=>void exportSelection()}><Download size={16}/> Export email CSV</button>
+  {exportCount!==null&&<><span role="status">{exportCount} rows ready</span><button type="button" className="project-tag" onClick={()=>{stopExport.current=true}}>Cancel export</button></>}
+ </div>
  <div className="list-toolbar">{marked.length?<><button onClick={()=>setMarked([])}>{marked.length} selected ×</button><button title="Archive selected" className="icon" onClick={()=>move(marked,'Archive')}><Archive size={16}/></button><button title="Delete selected" className="icon" onClick={()=>move(marked,'Trash')}><Trash2 size={16}/></button></>:<><div className="tabs">{['All mail','Unread'].map(f=><button key={f} className={filter===f?'on':''} onClick={()=>{setFilter(f);setLimit(60)}} disabled={!!query}>{f}{f==='Unread'&&nav==='Inbox'&&<span>{unreadIncoming}</span>}</button>)}</div><button className={'icon '+(!['All mail','Unread'].includes(filter)?'accent':'')} title="Filter messages" onClick={()=>setMenu(menu==='filters'?'':'filters')}><SlidersHorizontal size={17}/></button></>}
  {menu==='filters'&&<div className="popover filters">{['All mail','Unread','Starred','Attachments','Incoming','Urgent'].map(f=><button key={f} onClick={()=>{setFilter(f);setMenu('')}}>{f}{filter===f&&<Check size={14}/>}</button>)}</div>}</div>
  <div className="rows">
@@ -782,8 +923,9 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  {list.length>limit&&<button className="load" onClick={()=>setLimit(limit+60)}>Show more loaded messages</button>}
  {activeSearch&&liveToken&&<>
   {searchBusy&&<p role="status">Searching IONOS across all folders…</p>}
-  {searchError&&<p role="alert">{searchError}</p>}
-  {!searchBusy&&mailSearch.query===activeSearch&&mailSearch.next.length>0&&<button className="load"
+  {searchError&&<p role="alert">{searchError} {!searchBusy&&<button className="project-tag" type="button"
+   onClick={()=>void searchOlder(activeSearch,searchRevision.current,mailSearch.query===searchKey&&mailSearch.next.length?mailSearch.next:undefined)}>Retry search</button>}</p>}
+  {!searchBusy&&mailSearch.query===searchKey&&mailSearch.next.length>0&&<button className="load"
    onClick={()=>void searchOlder(activeSearch,searchRevision.current,mailSearch.next)}>Fetch more matching messages</button>}
  </>}</div>
  <footer className="list-footer">{nav==='Drafts'&&!query?draftList.length+' drafts':list.length+' messages'} <span>•</span> {liveToken?connection:'Local sandbox'}</footer>
@@ -791,7 +933,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <section className="reader">{currentRow?<><div className="reader-tools"><button className="icon back" title="Back to messages" onClick={()=>setMobileRead(false)}><ChevronLeft size={19}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Archive" onClick={()=>move([currentRow.id],'Archive')}><Archive size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.folder==='Trash'?'Delete forever':'Move to Trash'} onClick={()=>currentRow.folder==='Trash'?setDeleteTarget(currentRow):void move([currentRow.id],'Trash')}><Trash2 size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.unread?'Mark read':'Mark unread'} onClick={()=>change([currentRow.id],{unread:!currentRow.unread})}>{currentRow.unread?<MailOpen size={18}/>:<Mail size={18}/>}</button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Move message" onClick={()=>setMenu(menu==='move'?'':'move')}><MoreHorizontal size={20}/></button>{currentRow.folder!=='Inbox'&&currentRow.folder!=='Sent'&&<button className="icon" title="Restore message" onClick={()=>move([currentRow.id],currentRow.previousFolder==='Sent'?'Sent':'Inbox')}><RotateCcw size={17}/></button>}{menu==='move'&&<div className="popover move">{['Inbox','Sent','Archive','Trash','Spam'].filter(f=>f!==currentRow.folder).map(f=><button key={f} onClick={()=>move([currentRow.id],f)}>Move to {f}</button>)}</div>}<span className="tool-space"/><span className="position">{list.findIndex(m=>m.id===currentRow.id)+1} of {list.length}</span><button className="icon next" title="Previous message" disabled={list[0]===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)-1];if(p)open(p)}}><ChevronLeft size={18}/></button><button className="icon next next-right" title="Next message" disabled={list.at(-1)===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)+1];if(p)open(p)}}><ChevronLeft size={18}/></button></div>
  <div className="reader-scroll"><div className="reader-content"><div className="subject-line"><h2>{currentRow.subject}</h2><button className={'star '+(currentRow.star?'starred':'')} disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Toggle message star" onClick={()=>change([currentRow.id],{star:!currentRow.star})}><Star size={20}/></button></div><div className="reader-tags">{tag(currentRow)}{project&&<button className="project-tag" onClick={()=>{go('Active Projects');setProjectFilter(project.id)}}><FolderKanban size={13}/>{project.name}</button>}</div>
  <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}{currentRow.folder==='Sent'&&currentRow.bcc&&' · Bcc: '+currentRow.bcc}</small></div><MessageTimestamp value={currentRow.date}/></div>
- {mailFeatures.askAi&&!currentRow.id.startsWith('out-')&&<AskAi key={currentRow.id} subject={currentRow.subject} ask={(question,history)=>liveRequest('ask-ai',{id:currentRow.id,question,history})}/>}
+ {(mailFeatures.askAi||!liveToken)&&!currentRow.id.startsWith('out-')&&<AskAi key={currentRow.id} subject={currentRow.subject} ask={(question,history)=>askAboutMail(currentRow.id,question,history)}/>}
  {onSignOut&&liveToken&&currentRow.folder==='Inbox'&&<QualifiedBids key={currentRow.id} token={liveToken} message={currentRow.id}/>}
  {renderAttachments([currentRow,...newest.slice().reverse()])}
  {currentRow.due&&<div className="deadline"><div className="deadline-icon"><Clock3 size={19}/></div><div><b>Bid submission deadline</b><span>{day(currentRow.due+'T12:00:00')}</span></div><span className="tag gold">Open bid</span></div>}
@@ -934,7 +1076,8 @@ function HostedInbox({ready,highLevelOrigins,highLevelIssues,largeUploads,contac
 }
 
 const root=createRoot(document.getElementById('root')!);
-if (localToken) root.render(<App liveToken={localToken}/>);
+if (new URLSearchParams(location.search).get('sandbox')==='1') root.render(<App/>);
+else if (localToken) root.render(<App liveToken={localToken}/>);
 else if (import.meta.env.PROD && !['127.0.0.1','localhost','[::1]'].includes(location.hostname)) {
  hostedRequest('status').then(status=>{
   root.render(status.live?<HostedInbox ready={status.ready} highLevelOrigins={status.highLevelOrigins||[]} highLevelIssues={status.highLevelIssues||[]} largeUploads={status.largeFiles===true} contactLookup={status.contactLookup===true}/>:<App/>);

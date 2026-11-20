@@ -101,9 +101,9 @@ async function runProvider(provider,key,messages,budget,fetcher,settings) {
  return attempt(provider,key,messages,signal,fetcher,settings);
 }
 
-export async function runAiChain(config,messages,{budget=AbortSignal.timeout(totalTimeout),fetcher=fetch,attempts=[],bidScan=false,cooldowns,...settings}={}) {
+export async function runAiChain(config,messages,{budget=AbortSignal.timeout(totalTimeout),fetcher=fetch,attempts=[],bidScan=false,rotateGroq=false,cooldowns,...settings}={}) {
  let fallbackReason=null;
- for (const provider of bidScan?bidProviders:providers) {
+ for (const provider of bidScan||rotateGroq?bidProviders:providers) {
   const key=config[provider.key];
   if (!key) {
    fallbackReason??=provider.key+'_not_configured';
@@ -128,7 +128,7 @@ export async function runAiChain(config,messages,{budget=AbortSignal.timeout(tot
 
 const unavailable={status:502,data:{error:'Ask AI is temporarily unavailable. Try again.'}};
 
-export async function askEmail(config,mailbox,input,fetcher=fetch) {
+export async function askEmail(config,mailbox,input,fetcher=fetch,{resilient=false}={}) {
  const started=performance.now();
  const question=typeof input?.question==='string'?input.question.trim():'';
  const history=input?.history??[];
@@ -142,17 +142,18 @@ export async function askEmail(config,mailbox,input,fetcher=fetch) {
        typeof turn.content!=='string'||!turn.content.trim()||turn.content.length>2000)) {
    return {status:400,data:{error:'Enter a question of up to 2,000 characters.'}};
   }
-  if (!aiEnabled(config)) return {status:503,data:{error:'Ask AI has no provider configured.'}};
+  if (!aiEnabled(config)&&!resilient) return {status:503,data:{error:'Ask AI has no provider configured.'}};
   const budget=AbortSignal.timeout(totalTimeout);
-  const message=input.id
-   ? await waitForContext(mailbox.body(input.id,{includeHtml:false,includeImages:false,includeSubject:true}),budget)
-   : {};
-  if (!message) {
-   return budget.aborted ? unavailable :
+  const contextBudget=resilient?AbortSignal.any([budget,AbortSignal.timeout(9000)]):budget;
+  const [selected,matches]=await Promise.all([
+   input.id?waitForContext(mailbox.body(input.id,{includeHtml:false,includeImages:false,includeSubject:true}),contextBudget):{},
+   typeof mailbox.mailSearch==='function'?findRelevantMail(mailbox,question,input.id,contextBudget):undefined,
+  ]);
+  if (!selected&&!matches?.excerpts.length) {
+   return contextBudget.aborted ? unavailable :
     {status:404,data:{error:'This email is no longer available. Refresh the mailbox and try again.'}};
   }
-  const matches=typeof mailbox.mailSearch==='function'
-   ? await findRelevantMail(mailbox,question,input.id,budget) : undefined;
+  const message=selected||{};
   const body=message.body||'';
   const turns=[...history,{role:'user',content:question}];
   const messages=[{role:'user',content:JSON.stringify({
@@ -160,10 +161,22 @@ export async function askEmail(config,mailbox,input,fetcher=fetch) {
    email:body.slice(0,12000),excerptIncomplete:Boolean(message.truncated||body.length>12000),
    ...(matches?{mailboxMatches:matches}:{}),
   })},...turns.slice(1)];
-  const result=await runAiChain(config,messages,{budget,fetcher,attempts});
+  const result=await runAiChain(config,messages,{budget,fetcher,attempts,rotateGroq:resilient});
   answeredBy=result.provider;
   fallbackReason=result.fallbackReason;
   if (result.provider) return {status:200,data:{answer:result.answer,provider:result.provider,backup:result.provider==='Groq'}};
+  if (resilient) {
+   const evidence=[
+    ...(body?[{subject:message.subject||'Selected email',excerpt:body.slice(0,1200)}]:[]),
+    ...(matches?.excerpts||[]).filter(entry=>entry.excerpt).slice(0,3),
+   ];
+   if (evidence.length) {
+    answeredBy='Mailbox excerpts';
+    const answer='AI could not generate an answer. Here are the mailbox excerpts available for this question.\n\n'+
+     evidence.map(item=>item.subject+'\n'+item.excerpt).join('\n\n');
+    return {status:200,data:{answer,provider:answeredBy,backup:false,excerptsOnly:true}};
+   }
+  }
   if (result.stop) {
    const configurationError=result.reason==='http_401'||result.reason==='http_403';
    return {status:502,data:{error:configurationError

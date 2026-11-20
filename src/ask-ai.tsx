@@ -1,7 +1,7 @@
 import {useRef,useState,type FormEvent} from 'react';
 import {Sparkles,X} from 'lucide-react';
 
-type Answer = {answer:string;provider:'Gemini'|'Groq';backup?:boolean};
+type Answer = {answer:string;provider:'Gemini'|'Groq'|'Mailbox excerpts'|'Sandbox';backup?:boolean;excerptsOnly?:boolean};
 type Turn = {role:'user'|'assistant';content:string};
 type Exchange = {question:string;answer:Answer};
 
@@ -54,7 +54,8 @@ export function AskAi({ask,prefill='',toolbar=false,subject}:{
      {exchanges.map(({question,answer},index)=><div key={index} className="ask-ai-answer">
       <strong>{question}</strong>
       <p>{answer.answer}</p>
-      {answer.backup&&<small>Answered by backup model</small>}
+      {answer.backup&&<small>Answered by Groq fallback</small>}
+      {answer.excerptsOnly&&<small>{answer.provider==='Sandbox'?'Sandbox sample':'Mailbox excerpts'}</small>}
      </div>)}
     </div>}
     <label>Question
