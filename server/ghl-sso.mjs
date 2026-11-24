@@ -20,7 +20,7 @@ export function highLevelContext(payload, secret) {
  } catch { return null; }
 }
 
-export function createHighLevelLogin(env, allowed) {
+export function createHighLevelLogin(env, allowed, {lookup}={}) {
  const secret=env.GHL_APP_SHARED_SECRET?.trim();
  const companyId=env.GHL_COMPANY_ID?.trim();
  const locations=new Set((env.GHL_LOCATION_IDS||'').split(',').map(value=>value.trim()).filter(Boolean));
@@ -38,7 +38,8 @@ export function createHighLevelLogin(env, allowed) {
 
  const mailboxes=new Map();
  const raw=env.GHL_IONOS_MAILBOX_PASSWORDS?.trim();
- if (!raw) issues.push('GHL_IONOS_MAILBOX_PASSWORDS is missing or blank');
+ // With a team directory lookup, senior admins save passwords in the app, so the env mapping is optional.
+ if (!raw) { if (!lookup) issues.push('GHL_IONOS_MAILBOX_PASSWORDS is missing or blank'); }
  else {
   try {
    const mapping=JSON.parse(raw);
@@ -51,7 +52,7 @@ export function createHighLevelLogin(env, allowed) {
       mailboxes.set(address,password);
      }
     }
-    if (!mailboxes.size) issues.push('No mailbox in GHL_IONOS_MAILBOX_PASSWORDS has a password and matches IONOS_ALLOWED_MAILBOXES');
+    if (!mailboxes.size && !lookup) issues.push('No mailbox in GHL_IONOS_MAILBOX_PASSWORDS has a password and matches IONOS_ALLOWED_MAILBOXES');
    }
   } catch {
    issues.push('GHL_IONOS_MAILBOX_PASSWORDS is not valid JSON');
@@ -59,24 +60,26 @@ export function createHighLevelLogin(env, allowed) {
  }
  if (issues.length) return {login:null,issues};
 
- function getCredentials(identity) {
+ async function getCredentials(identity) {
   if (!identity || typeof identity.email!=='string' || typeof identity.userId!=='string' ||
       !identity.userId || identity.companyId!==companyId || !locations.has(identity.activeLocation)) return null;
   const email=identity.email.trim().toLowerCase();
-  const password=mailboxes.get(email);
+  // A password saved by a senior admin in Team access overrides the env mapping.
+  const password=(lookup ? await lookup(email) : null) || mailboxes.get(email);
   return password ? {email,password} : null;
  }
  return {issues,login:{
   origins:[...origins],
-  verify(payload,origin) {
+  async verify(payload,origin) {
    if (!origins.has(origin)) return {failure:'ghl_origin'};
    const context=highLevelContext(payload,secret);
    if (!context || typeof context.userId!=='string' || !context.userId) return {failure:'ghl_context'};
    if (context.companyId!==companyId) return {failure:'ghl_agency'};
    if (!locations.has(context.activeLocation)) return {failure:'ghl_location'};
-   const credentials=getCredentials(context);
+   const credentials=await getCredentials(context);
    if (!credentials) return {failure:'ghl_mailbox'};
-   return {identity:{email:credentials.email,userId:context.userId,companyId:context.companyId,activeLocation:context.activeLocation}};
+   const name=typeof context.userName==='string'?context.userName.replace(/[\x00-\x1f\x7f]/g,'').trim().slice(0,80):'';
+   return {identity:{email:credentials.email,userId:context.userId,companyId:context.companyId,activeLocation:context.activeLocation,...(name?{name}:{})}};
   },
   getCredentials,
  }};

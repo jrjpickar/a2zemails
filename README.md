@@ -194,3 +194,20 @@ Live Ask AI has read-only access to mailbox context and no sending tools. Gemini
 Full mailbox search checks IONOS in bounded 4,096-UID windows and processes up to three folders in parallel. It displays local matches while live results arrive and preserves matches from responsive folders when another folder times out. **Fetch more matching messages** continues through older ranges. **Retry search** resumes after a server error or a temporary rate limit. The initial Inbox remains limited to 200 recent messages.
 
 Use the **Search filters** icon in the search bar to choose a folder, date range or field. Searches start with the current mail folder and the last 30 calendar days. Workspace views without a physical folder search all folders. **All folders · Any time** broadens the search in one click. Subject, Sender and Message body modes apply to unqualified words. Existing prefixes such as `from:` and `subject:` still apply to their own terms. Search-result CSV exports use the same filters.
+
+## Team access for senior admins
+
+Set `SENIOR_ADMIN_EMAILS` in Netlify **Production → Functions** to a comma-separated list of full mailbox addresses, then redeploy once. `SENIOR_ADMIN_EMAIL` (single address) also works. Senior admins can always sign in and see a **Team access** button (people icon) next to their name in the bottom left.
+
+- **Give access**: enter the IONOS address and display name. The person can sign in right away with their own mailbox password. No redeploy.
+- **Offboard**: blocks sign-in and ends every open or remembered session within 10 seconds, including HighLevel auto sign-in. This also works for addresses listed in `IONOS_ALLOWED_MAILBOXES`. Drafts and signatures stay saved. **Restore access** reverses it.
+- **Sign out everywhere**: ends all current sessions for one mailbox without removing access.
+- **Rename**: sets the name shown in the bottom left menu. Without a name, the app uses the HighLevel user name, then the mailbox name (for example `jesse.pickar@` shows Jesse Pickar).
+
+The directory is stored in the `team-directory` Netlify Blobs store. `IONOS_ALLOWED_MAILBOXES` still works as the base list. Offboarding does not change the IONOS mailbox itself: change its password or set forwarding in IONOS.
+
+- **HighLevel password**: **Set HighLevel password** (or the optional password field when onboarding) turns on HighLevel auto sign-in for that mailbox. The app checks the password with IONOS before saving, encrypts it with a key derived from `SESSION_SECRET`, and never sends it back to the browser. A saved password overrides `GHL_IONOS_MAILBOX_PASSWORDS`, which is now optional. Offboarding deletes the saved password. If you rotate `SESSION_SECRET`, enter saved passwords again.
+
+## Older mail and bid invitations
+
+Messages skipped by the preview budget (for example invites with large plan sets) now get a 6 KB text preview, so rules and Groq classify them from the body and not only the subject. At the end of any mail list, **Load older mail from IONOS** pages 50 older messages at a time from that folder. Workspace views such as Bid Invitations page the Inbox. Loaded pages stay in the list after a refresh. Press **⌘/Ctrl+Enter** to send an open draft.

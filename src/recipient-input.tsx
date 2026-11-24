@@ -79,6 +79,12 @@ export function RecipientInput({label,value,onChange,contacts,autoFocus,lookup}:
        event.preventDefault();
        setActive((selected+(event.key==='ArrowDown'?1:matches.length-1))%matches.length);
       }
+      if (event.key==='Enter'&&(event.metaKey||event.ctrlKey)) {
+       // Cmd/Ctrl+Enter sends the draft. Keep a fully typed address, skip suggestion picks.
+       const address=pending.trim();
+       if (emailPattern.test(address)) choose(address);
+       return;
+      }
       if (event.key==='Enter'||event.key===','||event.key===';') {
        event.preventDefault();
        const address=pending.trim();

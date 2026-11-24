@@ -58,6 +58,11 @@ const server = createServer(async(req,res)=>{
     if (data.resetRequired) return json(res,409,{error:'An IONOS folder changed during the export. Restart the export.'});
     return json(res,200,await mailboxTemperatures(data,input?.temperature===true?temperature:null));
    }
+   if (path==='/api/ionos/mail-older' && req.method==='POST' && req.headers['content-type']==='application/json') {
+    const result=await mailbox.olderMail(await readJson(req,4096));
+    if (result.resetRequired) return json(res,409,{error:'This folder changed. Refresh the mailbox, then load older mail again.'});
+    return json(res,200,result);
+   }
    if (path==='/api/ionos/mail-search' && req.method==='POST' && req.headers['content-type']==='application/json') {
     const result=await mailbox.searchMailboxPage(await readJson(req,512000));
     if (result.resetRequired) return json(res,409,{error:'This folder changed. Start a new search.'});

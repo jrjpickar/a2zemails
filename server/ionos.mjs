@@ -106,8 +106,64 @@ function messageLocation(id) {
 function textParts(node) {
  if (!node || node.disposition==='attachment' || node.dispositionParameters?.filename || node.parameters?.name) return [];
  if (node.type?.startsWith('multipart/')) return (node.childNodes||[]).flatMap(textParts);
- if (node.type==='text/plain' || node.type==='text/html') return [{type:node.type,part:node.part||'1'}];
+ if (node.type==='text/plain' || node.type==='text/html') return [{type:node.type,part:node.part||'1',encoding:node.encoding,charset:node.parameters?.charset}];
  return [];
+}
+
+// Bounded text excerpt for messages whose full source is skipped (large plan sets, exhausted preview budget).
+// Classification and bid detection use it so big bid invitations are not categorized by subject alone.
+const previewBytes = 6000;
+function previewPart(structure) {
+ const parts = textParts(structure);
+ return parts.find(part=>part.type==='text/plain') || parts.find(part=>part.type==='text/html') || null;
+}
+const htmlEntities = {nbsp:' ',amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",'#39':"'"};
+export function decodePreview(part, raw) {
+ let bytes = raw;
+ const encoding = String(part.encoding||'').toLowerCase();
+ if (encoding==='base64') {
+  const text = raw.toString('latin1').replace(/[^A-Za-z0-9+/]/g,'');
+  bytes = Buffer.from(text.slice(0,text.length-text.length%4),'base64');
+ } else if (encoding==='quoted-printable') {
+  const text = raw.toString('latin1').replace(/=\r?\n/g,'');
+  const out = [];
+  for (let index=0;index<text.length;index++) {
+   const hex = text.slice(index+1,index+3);
+   if (text[index]==='=' && /^[0-9A-Fa-f]{2}$/.test(hex)) {out.push(parseInt(hex,16));index+=2;}
+   else out.push(text.charCodeAt(index)&255);
+  }
+  bytes = Buffer.from(out);
+ }
+ let text;
+ try { text = new TextDecoder(part.charset||'utf-8').decode(bytes); }
+ catch { text = bytes.toString('utf8'); }
+ if (part.type==='text/html') {
+  text = text.replace(/<(style|script)[\s\S]*?(?:<\/\1>|$)/gi,' ').replace(/<[^>]*>?/g,' ')
+   .replace(/&(nbsp|amp|lt|gt|quot|apos|#39);/gi,(_,name)=>htmlEntities[name.toLowerCase()]);
+ }
+ return text.replace(/\s+/g,' ').trim();
+}
+
+async function textPreviews(imap, items) {
+ const previews = new Map();
+ const wanted = new Map();
+ for (const item of items) {
+  const part = previewPart(item.bodyStructure);
+  if (part) wanted.set(item.uid,part);
+ }
+ const groups = new Map();
+ for (const [uid,part] of wanted) groups.set(part.part,[...(groups.get(part.part)||[]),uid]);
+ try {
+  for (const [key,uids] of groups) {
+   const rows = await imap.fetchAll(uids,{uid:true,bodyParts:[{key,maxLength:previewBytes}]},{uid:true});
+   for (const row of rows||[]) {
+    const raw = row.bodyParts?.get?.(key);
+    const part = wanted.get(row.uid);
+    if (raw && part) previews.set(row.uid,decodePreview(part,raw));
+   }
+  }
+ } catch { /* Previews are optional. The reader still downloads the body on open. */ }
+ return previews;
 }
 
 const inlineImageTypes = new Set(['image/png','image/jpeg','image/gif','image/webp']);
@@ -206,6 +262,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
      }).map(item=>item.uid);
      const sources = eligible.length ? await imap.fetchAll(eligible,{uid:true,source:true},{uid:true}) : [];
      const rawByUid = new Map(sources.map(item=>[item.uid,item.source]));
+     const previews = await textPreviews(imap,metadata.filter(item=>!item.flags.has('\\Deleted')&&!rawByUid.has(item.uid)));
      for (const item of metadata) {
       if (item.flags.has('\\Deleted')) continue;
       const raw = rawByUid.get(item.uid);
@@ -224,7 +281,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
       const headerId = parsed?.messageId || envelope?.messageId || '';
       const references = mimeReferences(parsed,envelope);
       const subject = envelope?.subject || '(No subject)';
-      const body = (parsed?.text || '').slice(0,90000);
+      const body = (parsed?.text || previews.get(item.uid) || '').slice(0,90000);
       const needsBody = !parsed || (parsed.text?.length || 0)>90000 || Boolean(parsed.html) || textParts(item.bodyStructure).some(part=>part.type==='text/html');
       const category = classify(subject,body,from);
       const attachments = attachedFiles(item.bodyStructure);
@@ -510,6 +567,39 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     }
    }
    return {mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),next:remaining,failed,deferred:queue.length>batch.length};
+  },
+  async olderMail(input) {
+   const {path,generation,before}=input||{};
+   if (typeof path!=='string'||!path||path.length>1024||/[\x00-\x1f\x7f]/.test(path)||
+       typeof generation!=='string'||!/^\d{1,20}$/.test(generation)||
+       !Number.isSafeInteger(before)||before<1||before>4294967296) throw new TypeError('Invalid older mail request.');
+   if (before<2) return {mail:[],next:null};
+   const mail=[];
+   let cursor={path,generation,before};
+   // Skip sparse UID windows so one request normally returns a page of older mail.
+   for (let step=0;step<4&&cursor&&!mail.length;step++) {
+    const result=await mailbox.mailSearch({query:'',positions:[cursor]},50,false,path,4096);
+    if (result.resetRequired) return {resetRequired:true};
+    mail.push(...result.mail.map(({messageBytes,...row})=>row));
+    cursor=result.next[0]||null;
+   }
+   if (mail.length) {
+    await readFolder(path,async imap=>{
+     if (String(imap.mailbox.uidValidity)!==generation) return;
+     const uids=mail.map(row=>Number(row.id.split(':').at(-1)));
+     const structures=await imap.fetchAll(uids,{uid:true,bodyStructure:true},{uid:true});
+     const previews=await textPreviews(imap,structures||[]);
+     for (const row of mail) {
+      const preview=previews.get(Number(row.id.split(':').at(-1)));
+      if (!preview) continue;
+      row.body=preview.slice(0,90000);
+      row.category=classify(row.subject,row.body,row.from);
+      row.project=matchProject(row.subject+' '+row.body);
+      row.due=row.category==='Bid Invitations'?bidDue(row.subject,row.body):undefined;
+     }
+    }).catch(()=>{});
+   }
+   return {mail,next:cursor};
   },
   async messageInfo(id,includeHeaders=false) {
    const match=messageLocation(id);

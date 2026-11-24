@@ -11,6 +11,7 @@ import { mailboxPreferences } from '../../server/mail-preferences.mjs';
 import { createHighLevelLogin } from '../../server/ghl-sso.mjs';
 import { ImapFlow } from 'imapflow';
 import { createIonosMailbox, ionosConfig } from '../../server/ionos.mjs';
+import { seniorAdmins, teamDirectory } from '../../server/team-directory.mjs';
 
 const mailboxSignInError = 'Could not sign in. Use your full IONOS mailbox address and mailbox password. A2Z must also enable the mailbox for direct sign-in.';
 const lifetime = 2 * 60 * 60 * 1000;
@@ -25,7 +26,7 @@ const reply = (body,status=200,cookie) => Response.json(body,{status,headers:coo
 function encrypt(key, login, duration=lifetime) {
  const iv = randomBytes(12);
  const cipher = createCipheriv('aes-256-gcm',key,iv);
- const encrypted = Buffer.concat([cipher.update(JSON.stringify({...login,expires:Date.now()+duration}),'utf8'),cipher.final()]);
+ const encrypted = Buffer.concat([cipher.update(JSON.stringify({...login,issued:Date.now(),expires:Date.now()+duration}),'utf8'),cipher.final()]);
  return Buffer.concat([iv,cipher.getAuthTag(),encrypted]).toString('base64url');
 }
 
@@ -54,11 +55,14 @@ async function readInput(request, limit) {
  catch { throw new TypeError('Invalid request body.'); }
 }
 
-export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments,lookupContacts=searchContacts}={}) {
+export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments,lookupContacts=searchContacts,directoryFactory=teamDirectory}={}) {
  const enabled = env.A2Z_MODE==='live';
  const allowed = new Set((env.IONOS_ALLOWED_MAILBOXES||'').split(',').map(value=>value.trim().toLowerCase()).filter(Boolean));
+ const admins = seniorAdmins(env);
+ for (const email of admins) allowed.add(email);
  const ready = enabled && allowed.size>0 && (env.SESSION_SECRET||'').length>=32;
- const highLevelSetup = ready ? createHighLevelLogin(env,allowed) : null;
+ const directory = ready ? directoryFactory(env) : null;
+ const highLevelSetup = ready ? createHighLevelLogin(env,allowed,{lookup:email=>directory.credential(email)}) : null;
  const highLevel=highLevelSetup?.login;
  const contacts=ready?contactsConfig(env):null;
  const temperature=temperatureConfig(env,contacts);
@@ -85,7 +89,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const input = await readInput(request,4096);
     const email = typeof input?.email==='string' ? input.email.trim().toLowerCase() : '';
     const password = input?.password;
-    if (!allowed.has(email) || typeof password!=='string' || !password || password.length>1024) {
+    if (typeof password!=='string' || !password || password.length>1024 || !(await directory.access(email)).allowed) {
      console.warn('[IONOS] Direct sign-in rejected by mailbox access or input checks.');
      return reply({error:mailboxSignInError},401);
     }
@@ -101,7 +105,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    }
    if (action==='ghl-login' && request.method==='POST') {
     const input=await readInput(request,26000);
-    const result=highLevel?.verify(input?.encryptedData,input?.parentOrigin);
+    const result=await highLevel?.verify(input?.encryptedData,input?.parentOrigin);
     if (!result?.identity) return reply({
      error:'Automatic sign-in is unavailable for this HighLevel account.',
      reason:result?.failure||'ghl_setup',
@@ -115,12 +119,41 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    }
    const cookie=usesCookie && request.headers.get('cookie')?.match(/(?:^|;\s*)__Host-a2z-mail=([A-Za-z0-9_-]+)(?=;|$)/)?.[1];
    session=decrypt(key,usesCookie?(cookie?'Bearer '+cookie:null):authorization);
-   const login = session?.highLevel ? highLevel?.getCredentials(session.highLevel) : session;
-   if (!login || !allowed.has(login.email)) return reply({
+   const login = session?.highLevel ? await highLevel?.getCredentials(session.highLevel) : session;
+   const access = login ? await directory.access(login.email,session.issued) : null;
+   if (!login || !access.allowed) return reply({
     error:'Sign in to your IONOS mailbox again.',
     reason:session?.highLevel?'ghl_mailbox':'session_expired',
    },401,usesCookie?sessionCookie('',0):undefined);
-   if (usesCookie && action==='session' && request.method==='GET') return reply({email:login.email});
+   const profile = {email:login.email,admin:access.admin,
+    name:access.namedByAdmin?access.name:(session.highLevel?.name||access.name)};
+   if (usesCookie && action==='session' && request.method==='GET') return reply({email:login.email,profile});
+   if (action==='profile' && request.method==='GET') return reply({profile});
+   if (action==='team' && request.method==='GET') {
+    if (!access.admin) return reply({error:'Only a senior admin can manage team access.'},403);
+    return reply({users:await directory.list()});
+   }
+   if (action==='team' && request.method==='POST') {
+    if (!access.admin) return reply({error:'Only a senior admin can manage team access.'},403);
+    const input=await readInput(request,4096);
+    if (input?.op==='set-ghl-password') {
+     const email=typeof input.email==='string'?input.email.trim().toLowerCase():'';
+     if (typeof input.password!=='string'||!input.password||input.password.length>1024) throw new TypeError('Enter the mailbox password.');
+     // Save only a password IONOS accepts, so HighLevel sign-in does not fail later.
+     const client=new Imap(configFor({email,password:input.password}).imap);
+     client.on('error',()=>{});
+     try { await client.connect(); }
+     catch (error) {
+      if (error.authenticationFailed||error.code==='EAUTH'||error.serverResponseCode==='AUTHENTICATIONFAILED') {
+       throw new TypeError('IONOS rejected that password for '+email+'. Nothing was saved.');
+      }
+      throw new TypeError('Could not reach IONOS to check the password. Try again.');
+     } finally { client.close(); }
+    }
+    const users=await directory.update(login.email,input);
+    console.info('[Team] '+login.email+' ran '+input.op+' for '+String(input.email).toLowerCase());
+    return reply({users});
+   }
    if (action==='bid-import-report' && request.method==='GET') {
     const [report,activity]=await Promise.all([readBidReport(login.email),readBidScanActivity(login.email)]);
     return reply({report,activity});
@@ -227,6 +260,11 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const sameLocation=temperature&&(!session.highLevel||session.highLevel.activeLocation===temperature.locationId);
     return reply(await mailboxTemperatures(data,input?.temperature===true&&sameLocation?temperature:null));
    }
+   if (action==='mail-older' && request.method==='POST') {
+    const result=await mailbox.olderMail(await readInput(request,4096));
+    if (result.resetRequired) return reply({error:'This folder changed. Refresh the mailbox, then load older mail again.'},409);
+    return reply(result);
+   }
    if (action==='mail-search' && request.method==='POST') {
     const input=await readInput(request,512000);
     const result=await mailbox.searchMailboxPage(input);
@@ -236,7 +274,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='mail' && request.method==='GET') {
     const canReadTemperature=temperature&&(!session.highLevel||session.highLevel.activeLocation===temperature.locationId);
     const data=await mailboxTemperatures(await mailbox.mail(),canReadTemperature?temperature:null);
-    return reply({...data,askAi:aiEnabled(ai)});
+    return reply({...data,askAi:aiEnabled(ai),profile});
    }
    if (action==='ask-ai' && request.method==='POST') {
     const {status,data}=await askEmail(ai,mailbox,await readInput(request,96000),fetch,{resilient:true});
@@ -297,6 +335,11 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     error:'The Estimating Desk request could not complete. Check the server setup and try again.',
    },502);
    if (action==='bid-import-report') return reply({error:'Could not load the bid import report. Try again.'},502);
+   if (action==='team') return reply({error:error instanceof TypeError?error.message:'The team directory could not update. Try again.'},error instanceof TypeError?400:502);
+   if (action==='mail-older'&&error instanceof TypeError) return reply({error:error.message},400);
+   if (action==='mail-older'&&!(error.authenticationFailed||error.code==='EAUTH'||error.serverResponseCode==='AUTHENTICATIONFAILED')) {
+    return reply({error:'IONOS did not return older mail. Try again.'},503);
+   }
    if (action==='contacts') return reply({
     error:error instanceof TypeError?'Invalid contact search.':'HighLevel contacts are temporarily unavailable.',
    },error instanceof TypeError?400:502);

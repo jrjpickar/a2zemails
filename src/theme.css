@@ -277,3 +277,20 @@ select, kbd, .project-tag, .gray, .attachments h3 span, .chips button { backgrou
 .row-mail-actions { display:flex; gap:2px; }
 .row-mail-actions button { padding:5px; }
 .delete-confirmation-actions { display:flex; justify-content:flex-end; gap:8px; }
+
+/* Team access (senior admin onboarding and offboarding) */
+.team-access { width: min(100%, 620px); }
+.team-onboard, .team-rename { display: grid; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.team-onboard p { margin: 0; }
+.team-tabs { display: flex; gap: 8px; }
+.team-tabs .project-tag { margin-left: 0; cursor: pointer; }
+.team-tabs .project-tag.active { outline: 2px solid currentColor; }
+.team-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.team-list li { display: grid; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.team-list li > div:first-child { display: grid; gap: 2px; }
+.team-list small { opacity: .75; overflow-wrap: anywhere; }
+.team-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.team-actions .project-tag { margin-left: 0; cursor: pointer; }
+.team-actions .danger { color: #b42318; }
+.team-confirm { display: grid; gap: 8px; padding: 12px; border: 1px solid #b42318; border-radius: var(--theme-radius); }
+.team-confirm p { margin: 0; }

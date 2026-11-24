@@ -4,7 +4,7 @@ import {SearchFilters,defaultSearchFilters,type SearchFiltersValue} from './sear
 import {downloadMailCsv,mailCsvHeader,mailCsvRows} from './mail-csv.mjs';
 import React,{useEffect,useMemo,useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {LayoutDashboard,ClipboardList,FolderKanban,Calculator,FileQuestion,HardHat,Receipt,Inbox,Send,FileText,Archive,Trash2,ShieldAlert,Plus,Search,SlidersHorizontal,PanelLeft,ChevronDown,ChevronLeft,Star,Paperclip,Reply,ReplyAll,Forward,MoreHorizontal,ArrowUpRight,Mail,Clock3,X,Check,Download,RotateCcw,MailOpen,Menu,ArrowRight,Moon,Palette,Settings2} from 'lucide-react';
+import {LayoutDashboard,ClipboardList,FolderKanban,Calculator,FileQuestion,HardHat,Receipt,Inbox,Send,FileText,Archive,Trash2,ShieldAlert,Plus,Search,SlidersHorizontal,PanelLeft,ChevronDown,ChevronLeft,Star,Paperclip,Reply,ReplyAll,Forward,MoreHorizontal,ArrowUpRight,Mail,Clock3,X,Check,Download,RotateCcw,MailOpen,Menu,ArrowRight,Moon,Palette,Settings2,Users} from 'lucide-react';
 import {categories,projects,seed,classify,matchProject,searchMail,initialState,threadFor,rowActions,appendSignature,dashboardQueues} from './model.mjs';
 import {RichMail,type MailBody} from './rich-mail';
 import {uploadLargeFile,type LargeFile} from './large-upload';
@@ -14,13 +14,14 @@ import {MessageText} from './message-text';
 import {AskAi} from './ask-ai';
 import {BidImportReport} from './bid-import-report';
 import {RecipientInput,type Contact} from './recipient-input';
+import {TeamAccess} from './team-access';
 import {rememberedSession,hostedRequest,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
 import './style.css';
 import './theme.css';
 const temperatures=[['cold','Cold'],['warm','Warm'],['hot','Hot'],['vip','VIP']] as const;
 type Temperature=typeof temperatures[number][0];
 type SearchCursor={path:string;before:number|null;generation:string|null};
-type Message={id:string;temperature?:Temperature;thread:string;name:string;company:string;subject:string;date:string;body:string;sentSignatureImage?:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
+type Message={id:string;older?:boolean;temperature?:Temperature;thread:string;name:string;company:string;subject:string;date:string;body:string;sentSignatureImage?:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
 type Upload={name:string;data:string;size?:number};
 type StagedUpload={id:string;name:string;size:number};
 type SavedDraft={id:string;to:string;subject:string;updatedAt:string};
@@ -99,10 +100,17 @@ function MessageTimestamp({value}:{value:string}) {
  </time>;
 }
 const initials=(name:string)=>name.split(' ').slice(0,2).map(s=>s[0]).join('');
+const mailboxName=(email:string)=>{const words=(email.split('@')[0]||'').split(/[._\-+]+/).filter(Boolean);return words.length?words.map(word=>word[0].toUpperCase()+word.slice(1).toLowerCase()).join(' '):'A2Z user';};
+type Profile={name:string;admin:boolean};
+type OlderCursor={path:string;generation:string;before:number};
 const avatarColors=['sand','lavender','sage','peach','sky'];
 function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveToken?:string;onSignOut?:(error?:unknown)=>Promise<void>;largeUploads?:boolean;contactLookup?:boolean}){
  const [knownContacts,setKnownContacts]=useState<Contact[]>([]);
  const [mailFeatures,setMailFeatures]=useState({askAi:false,temperatureFolders:false,temperatureUnavailable:false});
+ const [profile,setProfile]=useState<Profile|null>(null);
+ const [teamOpen,setTeamOpen]=useState(false);
+ const [olderCursors,setOlderCursors]=useState<Record<string,OlderCursor|null>>({});
+ const [olderBusy,setOlderBusy]=useState(false);
  const lookupContacts=React.useCallback(async(query:string,signal:AbortSignal):Promise<Contact[]>=>{
   const result=await hostedRequest('contacts',{query},liveToken,signal);
   return result.contacts||[];
@@ -173,15 +181,19 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  async function fetchMailbox(revision:number) {
   setConnection('Connecting to IONOS…');
   try {
-   const data: {email:string;mail:Message[];contacts:Contact[];folders?:string[];askAi?:boolean;temperatureFolders?:boolean;temperatureUnavailable?:boolean} = await liveRequest('mail');
+   const data: {email:string;mail:Message[];contacts:Contact[];folders?:string[];askAi?:boolean;temperatureFolders?:boolean;temperatureUnavailable?:boolean;profile?:Profile} = await liveRequest('mail');
    if (revision!==mailboxRevision.current) return;
    setKnownContacts(data.contacts||[]);
    setMailFeatures({askAi:!!data.askAi,temperatureFolders:!!data.temperatureFolders,temperatureUnavailable:!!data.temperatureUnavailable});
    setAccount(data.email);
+   if (data.profile) setProfile({name:data.profile.name,admin:!!data.profile.admin});
    setMailFolders((data.folders||[]).filter(folder=>!groups[1].links.some(([name])=>name===folder))
     .sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'})));
+   const fetched=new Set(data.mail.map(message=>message.id));
    setState(previous=>({...previous,mail:[
     ...data.mail,
+    // Keep older pages the user loaded. Refresh only replaces the recent window.
+    ...previous.mail.filter(message=>message.older&&!fetched.has(message.id)),
     ...previous.mail.filter(message=>message.folder==='Sent' && message.id.startsWith('out-') &&
       !data.mail.some(fetched=>fetched.headers.messageId===message.headers.messageId))
    ]}));
@@ -276,6 +288,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const unreadIncoming=inbox.filter(m=>m.unread).length;
  const queues=dashboardQueues(mail) as Record<'bids'|'urgent'|'unanswered'|'invoices',Message[]>;
  const contacts=liveToken?knownContacts:samples.map(m=>({address:m.from,name:m.name}));
+ const userName=profile?.name||mailboxName(account||demo);
  useEffect(()=>{if(liveToken)return;try{localStorage.setItem(storageKey,JSON.stringify(state))}catch{setToast('Browser storage is full. Changes are available until you reload.')}},[state]);
  useEffect(()=>{if(!toast)return;let id=setTimeout(()=>setToast(''),3200);return()=>clearTimeout(id)},[toast]);
  const customFolderPrefix='folder:';
@@ -333,6 +346,40 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   for (const item of localList) unique.set(item.id,item);
   return [...unique.values()].sort((a,b)=>b.date.localeCompare(a.date));
  },[localList,activeSearch,searchKey,mailSearch]);
+ const olderFolder=liveToken&&!activeSearch&&nav!=='Drafts'&&nav!=='Command Center'?(currentSearchFolder||'Inbox'):'';
+ const olderCursor=useMemo(()=>{
+  if (!olderFolder) return null;
+  if (Object.hasOwn(olderCursors,olderFolder)) return olderCursors[olderFolder];
+  let oldest:OlderCursor|null=null;
+  for (const message of mail) {
+   if (message.folder!==olderFolder) continue;
+   const match=message.id.match(/^(.+):(\d+):(\d+)$/s);
+   if (!match) continue;
+   const uid=Number(match[3]);
+   if (!oldest||uid<oldest.before) oldest={path:match[1],generation:match[2],before:uid};
+  }
+  return oldest;
+ },[olderFolder,olderCursors,mail]);
+ async function loadOlder() {
+  if (!olderFolder||!olderCursor||olderBusy) return;
+  const folder=olderFolder;
+  setOlderBusy(true);
+  try {
+   const data:{mail:Message[];next:OlderCursor|null}=await liveRequest('mail-older',olderCursor);
+   const rows=data.mail.map(message=>({...message,older:true}));
+   setState(previous=>{
+    const known=new Set(previous.mail.map(message=>message.id));
+    return {...previous,mail:[...previous.mail,...rows.filter(message=>!known.has(message.id))]};
+   });
+   setOlderCursors(previous=>({...previous,[folder]:data.next}));
+   setLimit(value=>value+rows.length);
+   const bids=rows.filter(message=>message.category==='Bid Invitations').length;
+   setToast(rows.length?'Loaded '+rows.length+' older '+folder+' messages'+(bids?' ('+bids+' bid invitations)':''):'No older messages in '+folder);
+  } catch(error) {
+   if ((error as {status?:number}|null)?.status===409) setOlderCursors({});
+   setToast(error instanceof Error?error.message:'Could not load older mail.');
+  } finally {setOlderBusy(false);}
+ }
  async function searchOlder(term:string,revision:number,positions?:SearchCursor[]) {
   searchAbort.current?.abort();
   const controller=new AbortController();
@@ -780,13 +827,13 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     refreshCurrentView();
     return;
    }
-   if(!e.shiftKey&&!editable&&!compose&&!preview&&!livePreview&&!deleteTarget&&!help&&!signatureForm&&currentRow&&['r','f'].includes(letter)){
+   if(!e.shiftKey&&!editable&&!compose&&!preview&&!livePreview&&!deleteTarget&&!help&&!signatureForm&&!teamOpen&&currentRow&&['r','f'].includes(letter)){
     e.preventDefault();
     start(letter==='r'?'Reply':'Forward',currentRow);
    }
    return;
   }
-  if((e.target instanceof HTMLElement ? e.target : document.body).matches('input,textarea,select,button')||e.metaKey||e.ctrlKey||e.altKey||compose||preview||livePreview||deleteTarget||help||signatureForm)return;
+  if((e.target instanceof HTMLElement ? e.target : document.body).matches('input,textarea,select,button')||e.metaKey||e.ctrlKey||e.altKey||compose||preview||livePreview||deleteTarget||help||signatureForm||teamOpen)return;
  if(e.key==='c'){e.preventDefault();start()}if(e.key==='/'){e.preventDefault();document.getElementById('search')?.focus()}if(e.key==='?')setHelp(true);if(e.key==='e'&&currentRow)move([currentRow.id],'Archive');
  }document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key)});
  const tag=(m:Message)=><span className={'tag '+tones[m.category]}>{tags[m.category]}</span>;
@@ -858,7 +905,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   const count=mail.filter(message=>message.folder===folder&&message.unread).length;
   return <button key={key} className={nav===key&&!query?'active':''} onClick={()=>go(key)}><FolderKanban size={16}/><span>{folder}</span>{count>0&&<b>{count}</b>}</button>;
  })}</section>}</div>
- <div className="sidebar-end"><div className="env"><i/> {liveToken ? connection : 'Sandbox workspace'}</div><div className="profile"><div className="profile-avatar">OP</div><div><b>Operations</b><small>A2Z Construction</small></div><button title="Keyboard shortcuts" onClick={()=>setHelp(true)}><MoreHorizontal size={17}/></button></div></div>
+ <div className="sidebar-end"><div className="env"><i/> {liveToken ? connection : 'Sandbox workspace'}</div><div className="profile"><div className="profile-avatar">{initials(userName).toUpperCase()}</div><div><b title={account||undefined}>{userName}</b><small>{profile?.admin?'Senior admin':'A2Z Construction'}</small></div>{profile?.admin&&hosted&&<button title="Team access" aria-label="Team access" onClick={()=>setTeamOpen(true)}><Users size={17}/></button>}<button title="Keyboard shortcuts" onClick={()=>setHelp(true)}><MoreHorizontal size={17}/></button></div></div>
  </aside>
  <main>
  <header className={'topbar'+((mailFeatures.askAi||!liveToken)?' topbar-with-ai':'')}><button className="icon nav-toggle" aria-label="Toggle navigation" onClick={()=>setSide(!side)}><Menu size={20}/></button><div className="crumb"><PanelLeft size={16}/> <span>Workspace</span><span className="slash">/</span><b>{query?'Search':viewName}</b></div>{(mailFeatures.askAi||!liveToken)&&<AskAi toolbar prefill={query}
@@ -920,6 +967,8 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  </div>}
  </div>):<div className="empty">No messages match this view.</div>}
  {list.length>limit&&<button className="load" onClick={()=>setLimit(limit+60)}>Show more loaded messages</button>}
+ {list.length<=limit&&olderFolder&&olderCursor&&<button className="load" disabled={olderBusy} onClick={()=>void loadOlder()}>
+  {olderBusy?'Loading older mail…':currentSearchFolder?'Load older '+olderFolder+' mail from IONOS':'Load older Inbox mail from IONOS'}</button>}
  {activeSearch&&liveToken&&<>
   {searchBusy&&<p role="status">Searching IONOS across all folders…</p>}
   {searchError&&<p role="alert">{searchError} {!searchBusy&&<button className="project-tag" type="button"
@@ -950,7 +999,16 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  {draft&&<div className="modal-back compose-overlay" onClick={closeDraft}><form ref={composeWindow.panel} style={composeWindow.position||undefined} className={"compose-panel"+(composeWindow.position?" compose-positioned":"")} role="dialog" aria-label="Compose message" aria-modal="true"
  onDragOver={event=>{if(event.dataTransfer.types.includes('Files')){event.preventDefault();event.dataTransfer.dropEffect=saving||sending?'none':'copy';setDraggingFiles(!saving&&!sending)}}}
  onDragLeave={event=>{if(!(event.relatedTarget instanceof Node)||!event.currentTarget.contains(event.relatedTarget))setDraggingFiles(false)}}
- onDrop={event=>{if(!event.dataTransfer.types.includes('Files'))return;event.preventDefault();setDraggingFiles(false);attachFiles(Array.from(event.dataTransfer.files))}} onClick={e=>e.stopPropagation()} onSubmit={sendDraft}><header className="compose-titlebar" onPointerDown={composeWindow.begin} onPointerMove={composeWindow.move} onPointerUp={composeWindow.end} onLostPointerCapture={composeWindow.end} onDoubleClick={event=>{if(!(event.target as HTMLElement).closest("button"))composeWindow.reset()}}><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending||saving} onClick={closeDraft}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts} lookup={contactLookup?lookupContacts:undefined}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><RecipientInput label="Bcc" value={draft.bcc||''} onChange={bcc=>edit({bcc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label><textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}{draft.includeSignature!==false&&state.signatureImages?.[draft.identity]&&<img className="signature-logo" alt="Signature" src={state.signatureImages[draft.identity]}/>}</div><button type="button" className="project-tag" disabled={sending||saving} onClick={openSignatures}>Edit signature</button></div>
+ onDrop={event=>{if(!event.dataTransfer.types.includes('Files'))return;event.preventDefault();setDraggingFiles(false);attachFiles(Array.from(event.dataTransfer.files))}} onClick={e=>e.stopPropagation()} onSubmit={sendDraft}
+ onKeyDown={event=>{
+  if (event.key!=='Enter'||!(event.metaKey||event.ctrlKey)||event.altKey||event.nativeEvent.isComposing) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (saving||sending) return;
+  const form=event.currentTarget;
+  // Defer one tick so a recipient typed into To/Cc is committed before sending.
+  window.setTimeout(()=>form.requestSubmit(),0);
+ }}><header className="compose-titlebar" onPointerDown={composeWindow.begin} onPointerMove={composeWindow.move} onPointerUp={composeWindow.end} onLostPointerCapture={composeWindow.end} onDoubleClick={event=>{if(!(event.target as HTMLElement).closest("button"))composeWindow.reset()}}><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending||saving} onClick={closeDraft}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts} lookup={contactLookup?lookupContacts:undefined}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><RecipientInput label="Bcc" value={draft.bcc||''} onChange={bcc=>edit({bcc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label><textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}{draft.includeSignature!==false&&state.signatureImages?.[draft.identity]&&<img className="signature-logo" alt="Signature" src={state.signatureImages[draft.identity]}/>}</div><button type="button" className="project-tag" disabled={sending||saving} onClick={openSignatures}>Edit signature</button></div>
  {draft.files.length>0||draft.largeFiles?.length||draft.forwardedAttachments?.length||draft.stagedAttachments?.length||draft.attachments?.length?
   <div className="chips draft-attachment-list" aria-label="Draft attachments">
    {draft.files.map((name,index)=>renderDraftFile('sample:'+index,name,()=>setPreview(name),()=>edit({files:draft.files.filter((_,i)=>i!==index)})))}
@@ -1006,7 +1064,9 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  </div>}
  {livePreview&&<AttachmentPreview source={livePreview} request={liveRequest} close={()=>setLivePreview(null)}/>}
  {preview&&<div className="modal-back centered" onClick={()=>setPreview(null)}><section className="attachment-preview" role="dialog" aria-label="Attachment preview" onClick={e=>e.stopPropagation()}><header><b>{preview}</b><button className="icon" title="Close preview" onClick={()=>setPreview(null)}><X size={19}/></button></header><div className="preview-sheet"><div className="eyebrow">A2Z CONSTRUCTION SERVICES / DEMO DOCUMENT</div><FileText size={42}/><h2>{preview.replace(/\.pdf$/i,'')}</h2><p>This is a simulated attachment for the sandbox.</p></div><footer><a href="/samples/demo.pdf" download={preview}><Download size={16}/> Download sample PDF</a></footer></section></div>}
- {help&&<div className="modal-back centered" onClick={()=>setHelp(false)}><section className="shortcuts" role="dialog" aria-label="Keyboard shortcuts" onClick={e=>e.stopPropagation()}><header><b>Keyboard shortcuts</b><button className="icon" title="Close shortcuts" onClick={()=>setHelp(false)}><X size={19}/></button></header>{[['C','Compose'],['/','Search'],['⌘R','Reply'],['⌘⇧R','Refresh mailbox'],['⌘F','Forward'],['E','Archive selected message'],['Esc','Close dialog or message'],['?','Show shortcuts']].map(([k,l])=><p key={k}><kbd>{k}</kbd> {l}</p>)}</section></div>}
+ {teamOpen&&liveToken&&<TeamAccess self={account} request={(path,body)=>liveRequest(path,body)} onClose={()=>setTeamOpen(false)}
+  onChanged={()=>void liveRequest('profile').then((data:{profile?:Profile})=>{if(data.profile)setProfile(data.profile)}).catch(()=>{})}/>}
+ {help&&<div className="modal-back centered" onClick={()=>setHelp(false)}><section className="shortcuts" role="dialog" aria-label="Keyboard shortcuts" onClick={e=>e.stopPropagation()}><header><b>Keyboard shortcuts</b><button className="icon" title="Close shortcuts" onClick={()=>setHelp(false)}><X size={19}/></button></header>{[['C','Compose'],['/','Search'],['⌘R','Reply'],['⌘⇧R','Refresh mailbox'],['⌘F','Forward'],['⌘/Ctrl+Enter','Send open draft'],['E','Archive selected message'],['Esc','Close dialog or message'],['?','Show shortcuts']].map(([k,l])=><p key={k}><kbd>{k}</kbd> {l}</p>)}</section></div>}
  {toast&&<div className="toast" role="status"><Check size={17}/>{toast}</div>}
  </div>
 }
