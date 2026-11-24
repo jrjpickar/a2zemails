@@ -108,13 +108,24 @@ function HealthView({request}:{request:Request}) {
   catch(failure) {setError(errorText(failure,'Health checks could not run.'));}
   finally {setBusy(false);}
  }
+ const [sortNote,setSortNote]=useState('');
+ async function sortNow() {
+  setSortNote('Starting…');
+  try {await request('admin-sort-now',{});setSortNote('AI sorting started for every mailbox. Run checks again in a few minutes to see the result.');}
+  catch(failure) {setSortNote(errorText(failure,'AI sorting could not start.'));}
+ }
  useEffect(()=>{void run();},[]);
  const summary=data?(['fail','warn','ok'] as const).map(status=>[status,data.checks.filter(check=>check.status===status).length] as const):[];
  return <div className="signature-fields">
   <div className="admin-toolbar">
    <span>{data?summary.map(([status,count])=>count+' '+(status==='ok'?'passing':status==='warn'?(count===1?'warning':'warnings'):'failing')).join(' · '):''}</span>
-   <button type="button" className="project-tag" disabled={busy} onClick={()=>void run()}><RotateCcw size={14}/> {busy?'Checking…':'Run checks'}</button>
+   <span className="admin-actions">
+    <button type="button" className="project-tag" onClick={()=>void sortNow()}>Run AI sorting now</button>
+    <button type="button" className="project-tag" disabled={busy} onClick={()=>void run()}><RotateCcw size={14}/> {busy?'Checking…':'Run checks'}</button>
+   </span>
   </div>
+  {sortNote&&<p role="status">{sortNote}</p>}
+  <small>AI sorting runs automatically at 9 AM and 3 PM Pacific for every active mailbox with a saved password.</small>
   {error&&<p role="alert">{error}</p>}
   {busy&&!data&&<p role="status">Running health checks…</p>}
   {data&&<ul className="admin-health">{data.checks.map(check=><li key={check.name} className={'health-'+check.status}>

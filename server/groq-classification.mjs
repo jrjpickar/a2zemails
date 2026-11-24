@@ -81,7 +81,7 @@ async function classifyBatch(batch,key,signal,fetcher,output) {
  }
 }
 
-export async function groqCategories(mail,email,key,fetcher=fetch) {
+export async function groqCategories(mail,email,key,fetcher=fetch,{deadline=deadlineMs}={}) {
  const labels = new Map();
  if (!key) return labels;
  const pending = [];
@@ -98,7 +98,7 @@ export async function groqCategories(mail,email,key,fetcher=fetch) {
   }
   pending.push({id:message.id,subject,body,subjectOnly:!body,cacheKey});
  }
- const signal = AbortSignal.timeout(deadlineMs);
+ const signal = AbortSignal.timeout(deadline||deadlineMs);
  // Keep bursts bounded when a full Inbox is opened. Unprocessed batches use rules.
  const parallel=6;
  for (let start=0;start<pending.length&&!signal.aborted;start+=parallel*batchSize) {

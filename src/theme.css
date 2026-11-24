@@ -317,3 +317,5 @@ select, kbd, .project-tag, .gray, .attachments h3 span, .chips button { backgrou
 .health-dot { width: 10px; height: 10px; border-radius: 50%; background: #2e7d32; }
 .health-warn .health-dot { background: #c77700; }
 .health-fail .health-dot { background: #b42318; }
+.admin-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.admin-actions .project-tag { margin-left: 0; cursor: pointer; }

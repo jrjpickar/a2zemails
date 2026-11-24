@@ -227,6 +227,8 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   if (hosted) void syncPreferences();
  },[account,hosted,liveToken]);
  const mail=state.mail;
+ const mailRef=React.useRef(mail);
+ mailRef.current=mail;
  const draft=state.drafts.find(d=>d.id===compose);
  const composeWindow=useComposePosition(draft?.id);
  const draftPayload=draft?JSON.stringify(draft):'';
@@ -837,6 +839,8 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   }
   setState(s=>({...s,mail:[m,...s.mail],drafts:s.drafts.filter(d=>d.id!==draft.id)}));setCompose(null);setToast(draftCleanupFailed?'Message sent. Remove the saved draft manually.':rejected.length?'IONOS rejected: '+rejected.join(', '):liveToken?(sentSaved?'Message accepted by IONOS':'Message sent. IONOS could not save a copy to Sent.'):'Message sent in sandbox');
   if(!draft.thread){go('Sent');setSelected(id);setMobileRead(true)}
+  // Swap the local copy for the IONOS Sent copy so its attachments can be opened.
+  if (liveToken&&sentSaved) window.setTimeout(()=>{void (refreshing.current||Promise.resolve()).then(()=>refreshMailbox());},2500);
  }
  function refreshCurrentView() {
   if (liveToken) void refreshMailbox();
@@ -868,9 +872,28 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    <button type="button" onClick={remove} disabled={saving||sending} aria-label={'Remove '+name}><X size={15}/></button>
   </span>;
  }
+ // A message you just sent is a local copy until IONOS returns the Sent copy, which carries the real attachment parts.
+ async function openSentAttachment(message:Message,name:string) {
+  const find=()=>mailRef.current.find(item=>!item.id.startsWith('out-')&&item.folder==='Sent'&&
+   item.headers.messageId===message.headers.messageId&&item.attachments?.some(file=>file.name===name));
+  let copy=find();
+  if (!copy) {
+   setToast('Loading the Sent copy from IONOS…');
+   await refreshing.current;
+   await refreshMailbox();
+   await new Promise(resolve=>setTimeout(resolve,50));
+   copy=find();
+  }
+  const file=copy?.attachments?.find(item=>item.name===name);
+  if (!copy||!file) {setToast('IONOS has not saved the Sent copy yet. Try again in a minute.');return;}
+  setSelected(copy.id);
+  setLivePreview({kind:'mail',id:copy.id,part:file.part,name:file.name,hosted});
+ }
  function renderAttachments(messages:Message[]) {
   const cards=messages.flatMap(message=>liveToken
-   ? (message.attachments||[]).map(file=>({key:message.id+':'+file.part,name:file.name,message,open:()=>setLivePreview({kind:'mail',id:message.id,part:file.part,name:file.name,hosted})}))
+   ? (message.attachments?.length
+    ? message.attachments.map(file=>({key:message.id+':'+file.part,name:file.name,message,open:()=>setLivePreview({kind:'mail',id:message.id,part:file.part,name:file.name,hosted})}))
+    : message.files.map((name,index)=>({key:message.id+':file:'+index,name,message,open:()=>void openSentAttachment(message,name)})))
    : message.files.map((name,index)=>({key:message.id+':'+index,name,message,open:()=>setPreview(name)})));
   if (!cards.length) return null;
   return <section className="attachments thread-attachments"><h3><Paperclip size={15}/> Attachments <span>{cards.length}</span></h3>

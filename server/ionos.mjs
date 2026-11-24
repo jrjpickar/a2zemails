@@ -187,8 +187,14 @@ function relatedImages(node) {
 function attachedFiles(node) {
  if (!node) return [];
  if (node.type?.startsWith('multipart/')) return (node.childNodes||[]).flatMap(attachedFiles);
- const name=node.dispositionParameters?.filename||node.parameters?.name;
- if (!name && node.disposition!=='attachment' && node.type!=='message/rfc822') return [];
+ let name=node.dispositionParameters?.filename||node.parameters?.name;
+ // Some senders (Outlook, scanners, phone apps) attach files without a file name. Keep any
+ // non-text file part, so Sent and received attachments are not hidden. Skip signatures and reports.
+ const unnamedFile=!name&&node.type&&!/^(?:text\/|multipart\/)/.test(node.type)&&
+  !/^application\/(?:pkcs7-signature|x-pkcs7-signature|pgp-signature|pgp-encrypted|ms-tnef)$|^message\/(?:delivery-status|disposition-notification)$/.test(node.type)&&
+  !(node.id&&inlineImageTypes.has(node.type));
+ if (!name && node.disposition!=='attachment' && node.type!=='message/rfc822' && !unnamedFile) return [];
+ if (!name && unnamedFile) name='Attachment.'+(node.type.split('/')[1]||'bin').replace(/[^a-z0-9]+/gi,'').slice(0,10);
  if (node.id && node.disposition!=='attachment' && inlineImageTypes.has(node.type)) return [];
  return [{part:node.part||'1',name:String(name||'Attachment').replace(/[\x00-\x1f\x7f/\\]/g,'_').slice(0,180),
   type:node.type||'application/octet-stream',size:Number(node.size)||0}];
@@ -308,7 +314,11 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     } finally { lock.release(); }
    }
   } finally { imap.close(); }
-  const labels = await groqCategories(mail,config.email,config.groqKey,fetchGroq);
+  // Categories saved by the scheduled 9 AM / 3 PM AI sort are reused, so only new mail goes to the model.
+  const stored = config.storedLabels instanceof Map ? config.storedLabels : new Map();
+  const labels = await groqCategories(mail.filter(row=>!stored.has(row.id)),config.email,config.groqKey,fetchGroq,{deadline:config.groqDeadline});
+  const aiLabels = new Map(labels);
+  for (const [id,category] of stored) if (!labels.has(id)) labels.set(id,category);
   for (const row of mail) {
    const category = labels.get(row.id);
    if (!category || category===row.category) continue;
@@ -319,7 +329,8 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    row.category = category;
    row.due = category==='Bid Invitations' ? bidDue(row.subject,row.body) : undefined;
   }
-  return {email:config.email,folders:[...new Set(folders.map(folderName))],contacts:[...contacts.values()],mail:mail.sort((a,b)=>b.date.localeCompare(a.date))};
+  return {email:config.email,folders:[...new Set(folders.map(folderName))],contacts:[...contacts.values()],mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),
+   ...(config.returnAiLabels?{aiLabels:Object.fromEntries(aiLabels)}:{})};
  }
 
  async function readConnection(operation,options={}) {

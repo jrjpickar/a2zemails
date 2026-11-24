@@ -4,6 +4,7 @@ import {dayInCalifornia,readBidReport,readBidScanActivity} from '../../server/bi
 import {contactsConfig,searchContacts,mailboxTemperatures,temperatureConfig} from '../../server/ghl-contacts.mjs';
 import {aiConfig,aiEnabled,aiModels,askEmail} from '../../server/ask-ai.mjs';
 import {adminConsole,healthChecks} from '../../server/admin-console.mjs';
+import {aiLabelStore,pacificTime,sortHours} from '../../server/ai-sort.mjs';
 import nodemailer from 'nodemailer';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { stagedAttachments, stagedFiles, CHUNK_BYTES, MAX_DOWNLOAD_BYTES, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
@@ -57,7 +58,7 @@ async function readInput(request, limit) {
  catch { throw new TypeError('Invalid request body.'); }
 }
 
-export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments,lookupContacts=searchContacts,directoryFactory=teamDirectory,adminFactory=adminConsole,fetcher=fetch,smtpFactory=nodemailer.createTransport}={}) {
+export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments,lookupContacts=searchContacts,directoryFactory=teamDirectory,adminFactory=adminConsole,fetcher=fetch,smtpFactory=nodemailer.createTransport,labelsFactory=aiLabelStore}={}) {
  const enabled = env.A2Z_MODE==='live';
  const allowed = new Set((env.IONOS_ALLOWED_MAILBOXES||'').split(',').map(value=>value.trim().toLowerCase()).filter(Boolean));
  const admins = seniorAdmins(env);
@@ -65,6 +66,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  const ready = enabled && allowed.size>0 && (env.SESSION_SECRET||'').length>=32;
  const directory = ready ? directoryFactory(env) : null;
  const admin = ready ? adminFactory() : null;
+ const aiLabels = ready ? labelsFactory() : null;
  const highLevelSetup = ready ? createHighLevelLogin(env,allowed,{lookup:email=>directory.credential(email)}) : null;
  const highLevel=highLevelSetup?.login;
  const contacts=ready?contactsConfig(env):null;
@@ -139,6 +141,19 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     if (!activity) return {status:'warn',detail:'No scan has run for '+login.email};
     const status=activity.status==='failed'?'fail':activity.status==='complete'||activity.status==='running'?'ok':'warn';
     return {status,detail:activity.status+(activity.reason?' ('+activity.reason+')':'')+' at '+activity.at};
+   },
+   'Scheduled AI sorting (9 AM and 3 PM)':async()=>{
+    if (!ai.groq) return {status:'warn',detail:'GROQ_API_KEY is not set'};
+    const run=await aiLabels.lastRun();
+    if (!run) return {status:'warn',detail:'No run yet. Next run at '+(pacificTime().hour<sortHours[0]?'9 AM':pacificTime().hour<sortHours[1]?'3 PM':'9 AM tomorrow')};
+    const failed=run.results.filter(item=>item.status==='failed');
+    const skipped=run.results.filter(item=>item.status==='skipped');
+    const sorted=run.results.filter(item=>item.status==='ok').reduce((sum,item)=>sum+item.sorted,0);
+    const ageHours=(Date.now()-Date.parse(run.finishedAt))/3600000;
+    const detail='Last '+run.trigger+' run '+new Date(run.finishedAt).toLocaleString('en-US',{timeZone:'America/Los_Angeles',dateStyle:'medium',timeStyle:'short'})+
+     ': '+sorted+' newly sorted'+(failed.length?'. Failed: '+failed.map(item=>item.email+' ('+item.detail+')').join(', '):'')+
+     (skipped.length?'. Skipped (no saved password): '+skipped.map(item=>item.email).join(', '):'');
+    return {status:failed.length||ageHours>20?'fail':skipped.length?'warn':'ok',detail};
    },
    'Configuration':async()=>missing.length?{status:'warn',detail:'Missing: '+missing.join(', ')}:
     {detail:allowed.size+' allowed mailboxes, '+admins.size+' senior admin(s)'},
@@ -242,6 +257,14 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     return reply({...activity,team:users.map(({email,name,status,admin:isAdmin})=>({email,name,status,admin:isAdmin}))});
    }
    if (action==='admin-health' && request.method==='GET') return reply(await healthChecks(healthFor(login)));
+   if (action==='admin-sort-now' && request.method==='POST') {
+    const token=env.BID_DRY_RUN_TOKEN?.trim();
+    if (!env.URL||!token||token.length<32) return reply({error:'Set URL and BID_DRY_RUN_TOKEN to run AI sorting.'},503);
+    const response=await fetcher(new URL('/.netlify/functions/ai-sort-background',env.URL),{method:'POST',
+     headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({trigger:'manual'}),signal:AbortSignal.timeout(5000)});
+    if (!response.ok&&response.status!==202) return reply({error:'AI sorting could not start.'},502);
+    return reply({accepted:true},202);
+   }
    if (action==='bid-import-report' && request.method==='GET') {
     const [report,activity]=await Promise.all([readBidReport(login.email),readBidScanActivity(login.email)]);
     return reply({report,activity});
@@ -335,7 +358,8 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     await preferencesFactory(login.email).saveSignature(input?.signature,input?.image);
     return reply({ok:true});
    }
-   const mailbox = mailboxFactory({...configFor(login),keywords:await admin.keywords()});
+   const mailbox = mailboxFactory({...configFor(login),keywords:await admin.keywords(),
+    ...(action==='mail'?{storedLabels:await aiLabels.load(login.email)}:{})});
    if (action==='bid-inspect' && request.method==='POST') {
     const input=await readInput(request,2048);
     const {status,...result}=await inspectBidEmail({email:login.email,id:input?.id,mailbox,env});

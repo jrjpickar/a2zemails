@@ -230,3 +230,9 @@ The people icon next to a senior admin's name opens the **Admin console**:
 - **Health checks**: IONOS IMAP and SMTP with your mailbox, Netlify Blobs, Groq, Gemini, HighLevel sign-in and contacts, Estimating Desk, your last bid scan and missing settings. Results show status, timing and safe detail only.
 
 Ask AI uses the same Groq reasoning model as the A2Z MCP (`openai/gpt-oss-120b`, high reasoning) with Groq browser search first, then Gemini with Google Search grounding. Optional: `ASK_AI_GROQ_MODEL` (`openai/gpt-oss-120b` or `openai/gpt-oss-20b`), and `ASK_AI_WEB_SEARCH=0` turns web search off.
+
+## Scheduled AI sorting
+
+`ai-sort-scheduled` runs at 9 AM and 3 PM Pacific (Netlify schedules are UTC, so it fires at 16, 17, 22 and 23 UTC and only acts at 9 or 3 Pacific, which handles daylight saving time). It starts the `ai-sort-background` function, which signs in to every active mailbox that has a saved password (Admin console > Team > Set HighLevel password, `GHL_IONOS_MAILBOX_PASSWORDS`, or `MCP_IONOS_PASSWORD`), sorts recent Inbox mail with the AI and your keywords, and saves the AI categories in the `ai-labels` Netlify Blobs store. When anyone opens the inbox, saved categories apply right away and only newer mail goes to the AI. Needs `URL`, `BID_DRY_RUN_TOKEN` and `GROQ_API_KEY`. Admin console > Health checks shows the last run and has **Run AI sorting now**.
+
+Sent attachments: messages you just sent open their attachments from the IONOS Sent copy, and the app swaps in that copy a few seconds after sending. File parts without a file name now show as attachments.
