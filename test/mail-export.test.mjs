@@ -54,7 +54,7 @@ test('Resilient Ask AI tries Groq after Gemini and returns local evidence if eve
  const response=await askEmail(config,mailbox,request,async (url,options)=>{
   if (url.includes('googleapis')) throw new DOMException('fixture','TimeoutError');
   const payload=JSON.parse(options.body);
-  assert.equal(payload.tools,undefined);
+  assert.deepEqual(payload.tools,[{type:'browser_search'}]);
   models.push(payload.model);
   if (models.length===1) throw new DOMException('fixture','TimeoutError');
   return Response.json({choices:[{message:{content:'Tuesday.'}}]});

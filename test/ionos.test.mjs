@@ -231,7 +231,7 @@ test('Trash creates a retained folder and permanent deletion targets only a Tras
  const mailbox=createIonosMailbox(ionosConfig(env),{Imap:FakeImap});
  const before=await mailbox.mail();
  assert.deepEqual(before.folders,['Inbox','Trash','Completed Jobs']);
- assert.equal(before.mail[0].project,'P-241');
+ assert.equal(before.mail[0].project,'',"live mail is not matched to sandbox sample projects");
  const remove=id=>mailbox.update({id,action:'delete-forever'});
  assert.match((await remove('INBOX:22:4')).error,/Move the message to Trash/);
  assert.deepEqual(await mailbox.update({id:'INBOX:22:4',action:'move',destination:'Trash'}),{ok:true});

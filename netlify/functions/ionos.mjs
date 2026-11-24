@@ -2,7 +2,9 @@ import {sealBidScan} from '../../server/bid-scan-session.mjs';
 import {bidImportSettings,bidPreview,bookQualifiedBid,currentQualifiedBids,inspectBidEmail,oneEmailBids,qualifiedBids,qualifiedBidCsv} from '../../server/bid-import.mjs';
 import {dayInCalifornia,readBidReport,readBidScanActivity} from '../../server/bid-leads.mjs';
 import {contactsConfig,searchContacts,mailboxTemperatures,temperatureConfig} from '../../server/ghl-contacts.mjs';
-import {aiConfig,aiEnabled,askEmail} from '../../server/ask-ai.mjs';
+import {aiConfig,aiEnabled,aiModels,askEmail} from '../../server/ask-ai.mjs';
+import {adminConsole,healthChecks} from '../../server/admin-console.mjs';
+import nodemailer from 'nodemailer';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { stagedAttachments, stagedFiles, CHUNK_BYTES, MAX_DOWNLOAD_BYTES, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
 import { largeFileLinks,largeFileRefs,largeFilesEnabled } from '../../server/large-file-links.mjs';
@@ -55,13 +57,14 @@ async function readInput(request, limit) {
  catch { throw new TypeError('Invalid request body.'); }
 }
 
-export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments,lookupContacts=searchContacts,directoryFactory=teamDirectory}={}) {
+export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments,lookupContacts=searchContacts,directoryFactory=teamDirectory,adminFactory=adminConsole,fetcher=fetch,smtpFactory=nodemailer.createTransport}={}) {
  const enabled = env.A2Z_MODE==='live';
  const allowed = new Set((env.IONOS_ALLOWED_MAILBOXES||'').split(',').map(value=>value.trim().toLowerCase()).filter(Boolean));
  const admins = seniorAdmins(env);
  for (const email of admins) allowed.add(email);
  const ready = enabled && allowed.size>0 && (env.SESSION_SECRET||'').length>=32;
  const directory = ready ? directoryFactory(env) : null;
+ const admin = ready ? adminFactory() : null;
  const highLevelSetup = ready ? createHighLevelLogin(env,allowed,{lookup:email=>directory.credential(email)}) : null;
  const highLevel=highLevelSetup?.login;
  const contacts=ready?contactsConfig(env):null;
@@ -73,6 +76,74 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
   IONOS_SMTP_PORT:env.IONOS_SMTP_PORT,
   GROQ_API_KEY:env.GROQ_API_KEY,
  });
+ // Senior admin health checks. Each returns ok, warn or fail with safe detail only (no secrets).
+ function healthFor(login) {
+  const timed=async(url,options={})=>{
+   const response=await fetcher(url,{...options,signal:AbortSignal.timeout(6000)});
+   if (!response.ok) throw new Error('HTTP '+response.status);
+   return response;
+  };
+  const missing=[
+   (env.SESSION_SECRET||'').length<32&&'SESSION_SECRET',
+   !admins.size&&'SENIOR_ADMIN_EMAILS',
+   !(env.BID_DRY_RUN_TOKEN||'').trim()&&'BID_DRY_RUN_TOKEN',
+   !env.URL&&'URL (Netlify site URL)',
+  ].filter(Boolean);
+  return {
+   'IONOS mailbox (IMAP)':async()=>{
+    const client=new Imap(configFor(login).imap);
+    client.on('error',()=>{});
+    try {await client.connect();return {detail:'Signed in as '+login.email};}
+    finally {client.close();}
+   },
+   'IONOS sending (SMTP)':async()=>{
+    const transport=smtpFactory(configFor(login).smtp);
+    try {await transport.verify();return {detail:'SMTP accepted the mailbox login'};}
+    finally {transport.close?.();}
+   },
+   'Netlify Blobs storage':async()=>{
+    await admin.keywords(true);
+    const users=await directory.list();
+    return {detail:users.length+' mailboxes in the team directory'};
+   },
+   'Groq (Ask AI and sorting)':async()=>{
+    if (!ai.groq) return {status:'warn',detail:'GROQ_API_KEY is not set'};
+    const data=await (await timed('https://api.groq.com/openai/v1/models',{headers:{Authorization:'Bearer '+ai.groq}})).json();
+    const model=ai.askGroqModel||aiModels.groq;
+    const found=(data?.data||[]).some(item=>item.id===model);
+    return found?{detail:model+' available. Web search '+(ai.webSearch?'on':'off')}:{status:'warn',detail:model+' is not listed for this key'};
+   },
+   'Gemini (Ask AI backup)':async()=>{
+    if (!ai.gemini) return {status:'warn',detail:'GEMINI_API_KEY is not set'};
+    const model=ai.askModel||aiModels.gemini;
+    await timed('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model),{headers:{'x-goog-api-key':ai.gemini}});
+    return {detail:model+' available'};
+   },
+   'HighLevel auto sign-in':async()=>{
+    const issues=highLevelSetup?.issues||[];
+    return issues.length?{status:'warn',detail:issues.join('. ')}:{detail:'Configured'};
+   },
+   'HighLevel contacts':async()=>{
+    if (!contacts) return {status:'warn',detail:'GHL_CONTACTS_PIT_TOKEN or location is not set'};
+    await lookupContacts(contacts,'a2z');
+    return {detail:'Contact search responded'};
+   },
+   'Estimating Desk':async()=>{
+    const settings=bidImportSettings(env);
+    if (!settings) return {status:'warn',detail:'ESTIMATING_DESK_URL or ESTIMATING_DESK_IMPORT_SECRET is not set'};
+    await timed(new URL('/',settings.url).href,{method:'GET'});
+    return {detail:'Desk site responded'};
+   },
+   'Bid scan':async()=>{
+    const activity=await readBidScanActivity(login.email);
+    if (!activity) return {status:'warn',detail:'No scan has run for '+login.email};
+    const status=activity.status==='failed'?'fail':activity.status==='complete'||activity.status==='running'?'ok':'warn';
+    return {status,detail:activity.status+(activity.reason?' ('+activity.reason+')':'')+' at '+activity.at};
+   },
+   'Configuration':async()=>missing.length?{status:'warn',detail:'Missing: '+missing.join(', ')}:
+    {detail:allowed.size+' allowed mailboxes, '+admins.size+' senior admin(s)'},
+  };
+ }
  return async function handler(request) {
   const url = new URL(request.url);
   const action = url.searchParams.get('action');
@@ -91,12 +162,15 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const password = input?.password;
     if (typeof password!=='string' || !password || password.length>1024 || !(await directory.access(email)).allowed) {
      console.warn('[IONOS] Direct sign-in rejected by mailbox access or input checks.');
+     if (/^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/.test(email)) await admin.record(email,'sign-in-failed');
      return reply({error:mailboxSignInError},401);
     }
     const client = new Imap(configFor({email,password}).imap);
     client.on('error',()=>{});
     try { await client.connect(); }
+    catch (error) { await admin.record(email,'sign-in-failed'); throw error; }
     finally { client.close(); }
+    await admin.record(email,'sign-in');
     if (input.remember===true) {
      const token=encrypt(key,{email,password},rememberedSeconds*1000);
      if (token.length<=3800) return reply({token:cookieAuthorization,email},200,sessionCookie(token,rememberedSeconds));
@@ -110,6 +184,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
      error:'Automatic sign-in is unavailable for this HighLevel account.',
      reason:result?.failure||'ghl_setup',
     },401);
+    await admin.record(result.identity.email,'ghl-sign-in');
     return reply({token:encrypt(key,{highLevel:result.identity}),email:result.identity.email});
    }
    const authorization=request.headers.get('authorization');
@@ -152,8 +227,21 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     }
     const users=await directory.update(login.email,input);
     console.info('[Team] '+login.email+' ran '+input.op+' for '+String(input.email).toLowerCase());
+    await admin.record(login.email,'team');
     return reply({users});
    }
+   if (action?.startsWith('admin-') && !access.admin) return reply({error:'Only a senior admin can open the admin console.'},403);
+   if (action==='admin-keywords' && request.method==='GET') return reply({keywords:await admin.keywords(true)});
+   if (action==='admin-keywords' && request.method==='POST') {
+    const keywords=await admin.updateKeywords(login.email,await readInput(request,2048));
+    await admin.record(login.email,'keywords');
+    return reply({keywords});
+   }
+   if (action==='admin-activity' && request.method==='GET') {
+    const [activity,users]=await Promise.all([admin.activity({days:url.searchParams.get('days')}),directory.list()]);
+    return reply({...activity,team:users.map(({email,name,status,admin:isAdmin})=>({email,name,status,admin:isAdmin}))});
+   }
+   if (action==='admin-health' && request.method==='GET') return reply(await healthChecks(healthFor(login)));
    if (action==='bid-import-report' && request.method==='GET') {
     const [report,activity]=await Promise.all([readBidReport(login.email),readBidScanActivity(login.email)]);
     return reply({report,activity});
@@ -168,6 +256,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const ticket=sealBidScan(env.SESSION_SECRET,login,input?.fresh===true);
     const response=await fetch(endpoint,{method:'POST',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
      body:JSON.stringify({ticket}),signal:AbortSignal.timeout(5000)});
+    if (response.status===202||response.ok) await admin.record(login.email,'bid-scan');
     return response.status===202||response.ok ? reply({accepted:true},202) :
      reply({error:'The bid scan could not be queued.'},502);
    }
@@ -246,13 +335,17 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     await preferencesFactory(login.email).saveSignature(input?.signature,input?.image);
     return reply({ok:true});
    }
-   const mailbox = mailboxFactory(configFor(login));
+   const mailbox = mailboxFactory({...configFor(login),keywords:await admin.keywords()});
    if (action==='bid-inspect' && request.method==='POST') {
     const input=await readInput(request,2048);
     const {status,...result}=await inspectBidEmail({email:login.email,id:input?.id,mailbox,env});
     return reply(result,status);
    }
-   if (action==='mail-export-folders' && request.method==='GET') return reply({folders:await mailbox.exportFolders()});
+   if (action==='mail-export-folders' && request.method==='GET') {
+    const folders=await mailbox.exportFolders();
+    await admin.record(login.email,'export');
+    return reply({folders});
+   }
    if (action==='mail-export-page' && request.method==='POST') {
     const input=await readInput(request,8192);
     const data=await mailbox.exportPage(input);
@@ -274,10 +367,12 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='mail' && request.method==='GET') {
     const canReadTemperature=temperature&&(!session.highLevel||session.highLevel.activeLocation===temperature.locationId);
     const data=await mailboxTemperatures(await mailbox.mail(),canReadTemperature?temperature:null);
+    await admin.record(login.email,'open',{throttle:true});
     return reply({...data,askAi:aiEnabled(ai),profile});
    }
    if (action==='ask-ai' && request.method==='POST') {
     const {status,data}=await askEmail(ai,mailbox,await readInput(request,96000),fetch,{resilient:true});
+    await admin.record(login.email,'ask-ai');
     return reply(data,status);
    }
    if (action==='body' && request.method==='POST') {
@@ -318,6 +413,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const large=largeFileRefs(input?.largeFiles);
     const links=large.length ? await largeFileLinks(env,login.email).links(input.id?.slice(4),large) : [];
     const result=await mailbox.send(input,uploaded,links);
+    await admin.record(login.email,'send');
     let draftCleanupFailed=false;
     if (input.savedDraft===true) {
      try { await preferencesFactory(login.email).discard(input.id.slice(4)); }
@@ -331,6 +427,10 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='update' && request.method==='POST') return reply(await mailbox.update(await readInput(request,4096)));
    return reply({error:'Unknown mailbox action.'},404);
   } catch(error) {
+   if (admin&&!(error instanceof TypeError)&&!error?.authenticationFailed&&error?.code!=='EAUTH') {
+    await admin.record(session?.email||session?.highLevel?.email||'','error');
+   }
+   if (action?.startsWith('admin-')) return reply({error:error instanceof TypeError?error.message:'The admin console request failed. Try again.'},error instanceof TypeError?400:502);
    if (['bid-qualified','bid-qualified-csv','bid-book','bid-scan','bid-inspect'].includes(action)) return reply({
     error:'The Estimating Desk request could not complete. Check the server setup and try again.',
    },502);

@@ -9,12 +9,37 @@ export function currentMessageText(body) {
  return body.split(/^\s*(?:-{2,}\s*(?:original|forwarded) message\s*-*|begin forwarded message:|on .+ wrote:|from:[^\n]+\n(?:\s*\n)?\s*(?:sent|date):)/im,1)[0]
   .replace(/^\s*>.*$/gm,'');
 }
-export function classify(subject, body='', sender='', rules={}) {
+// Bid boards that send invitations. A message from one, or with one in its current text, is a bid invite
+// unless the subject says it is a reply, RFI, addendum, award or account notice.
+const bidPlatforms=/\b(planhub|buildingconnected|bidmail|smartbid(?:net)?|isqft|constructconnect|pipelinesuite|bidclerk|bidnet|bluebeam studio)\b/;
+const notAnInvite=/^\s*(re|fw|fwd)\s*:|\b(rfi|addend(?:um|a)|award(?:ed)?|password|verify|subscription|newsletter|webinar|receipt|invoice)\b/;
+// Senior admin sorting keywords: [{term, category, field:'subject'|'any'}]. They run before the built-in rules.
+const escapeTerm=value=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+export function keywordCategory(subject, body='', keywords=[]) {
+ if(!Array.isArray(keywords)||!keywords.length) return '';
+ const s=String(subject||'').toLowerCase();
+ let current;
+ for(const keyword of [...keywords].sort((a,b)=>b.term.length-a.term.length)){
+  if(!keyword?.term||!categories.includes(keyword.category)) continue;
+  const pattern=new RegExp('(?:^|[^a-z0-9])'+escapeTerm(keyword.term.toLowerCase())+'(?:$|[^a-z0-9])');
+  if(pattern.test(s)) return keyword.category;
+  if(keyword.field==='any'){
+   current??=currentMessageText(String(body||'')).toLowerCase().slice(0,20000);
+   if(pattern.test(current)) return keyword.category;
+  }
+ }
+ return '';
+}
+export function classify(subject, body='', sender='', rules={}, keywords=[]) {
  const domain=sender.toLowerCase().split('@')[1];
  if(domain && Object.hasOwn(rules,domain) && categories.includes(rules[domain])) return rules[domain];
+ const custom=keywordCategory(subject,body,keywords);
+ if(custom) return custom;
+ const current=currentMessageText(body).toLowerCase();
+ if((bidPlatforms.test(domain||'')||bidPlatforms.test(current.slice(0,4000)))&&!notAnInvite.test(subject.toLowerCase())) return categories[0];
  for(const content of [subject,currentMessageText(body)]){
  const s=content.toLowerCase();
- if(/\b(itb|rfp|bid invitations?|invitation to bid|request for (?:bids?|proposals?)|intent to bid|invit(?:e|ed|ing)\b[^.!?\n]{0,50}\bto bid)\b/.test(s)) return categories[0];
+ if(/\b(itb|rfp|bid invit(?:e|es|ation|ations)|invitation to (?:bid|tender)|request for (?:bids?|proposals?|pricing|quotes?)|intent to bid|out to bid|bids? (?:are )?due|bid date|invit(?:e|es|ed|ing)\b[^.!?\n]{0,50}\bto (?:submit (?:a |your )?)?bid)\b/.test(s)) return categories[0];
  if(/\b(rfi|request for information|change order|co[- #]?\d+)\b/.test(s)) return categories[2];
  if(/\b((?:demo(?:lition)?|revised|updated) bids?|bid (?:revision|scope|clarification|submission))\b/.test(s)) return categories[1];
  if(/\b(invoice|payment|purchase order|po[- #]?\d+|receipt)\b/.test(s)) return categories[4];

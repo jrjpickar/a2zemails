@@ -1,4 +1,4 @@
-import {useEffect,useState,type FormEvent} from 'react';
+import React,{useEffect,useState,type FormEvent} from 'react';
 import {X} from 'lucide-react';
 
 export type TeamUser={
@@ -11,7 +11,7 @@ type Request=(path:string,body?:object)=>Promise<{users:TeamUser[]}>;
 
 const shortDate=(value:string|number|null)=>value?new Date(value).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):'';
 
-export function TeamAccess({request,self,onClose,onChanged}:{request:Request;self:string;onClose:()=>void;onChanged?:()=>void}) {
+export function TeamAccess({request,self,onClose,onChanged,embedded=false}:{request:Request;self:string;onClose:()=>void;onChanged?:()=>void;embedded?:boolean}) {
  const [users,setUsers]=useState<TeamUser[]|null>(null);
  const [busy,setBusy]=useState('');
  const [error,setError]=useState('');
@@ -63,11 +63,13 @@ export function TeamAccess({request,self,onClose,onChanged}:{request:Request;sel
  const shown=(users||[]).filter(user=>user.status===filter);
  const counts={active:(users||[]).filter(user=>user.status==='active').length,offboarded:(users||[]).filter(user=>user.status==='offboarded').length};
 
- return <div className="modal-back centered" onClick={()=>{if(!busy)onClose()}}>
-  <section className="signature-settings team-access" role="dialog" aria-modal="true" aria-label="Team access" onClick={event=>event.stopPropagation()}
-   onKeyDown={event=>{if(event.key==='Escape'){event.stopPropagation();if(ghlEditing)setGhlEditing('');else if(editing)setEditing(null);else if(confirm)setConfirm(null);else if(!busy)onClose();}}}>
-   <header><b>Team access</b><button type="button" className="icon" title="Close team access" disabled={Boolean(busy)} onClick={onClose}><X size={19}/></button></header>
-   <div className="signature-fields">
+
+ const escape=(event:React.KeyboardEvent)=>{
+  if(event.key!=='Escape')return;
+  if(ghlEditing||editing||confirm){event.stopPropagation();if(ghlEditing)setGhlEditing('');else if(editing)setEditing(null);else setConfirm(null);return;}
+  if(!embedded){event.stopPropagation();if(!busy)onClose();}
+ };
+ const content=<div className="signature-fields" onKeyDown={escape}>
     <form className="team-onboard" onSubmit={onboard}>
      <b>Onboard a mailbox</b>
      <p>The person signs in with their own IONOS address and mailbox password. Create the mailbox in IONOS first.</p>
@@ -123,7 +125,12 @@ export function TeamAccess({request,self,onClose,onChanged}:{request:Request;sel
       <button type="button" className="project-tag" disabled={Boolean(busy)} onClick={()=>setConfirm(null)}>Cancel</button>
      </div>
     </div>}
-   </div>
+   </div>;
+ if (embedded) return content;
+ return <div className="modal-back centered" onClick={()=>{if(!busy)onClose()}}>
+  <section className="signature-settings team-access" role="dialog" aria-modal="true" aria-label="Team access" onClick={event=>event.stopPropagation()}>
+   <header><b>Team access</b><button type="button" className="icon" title="Close team access" disabled={Boolean(busy)} onClick={onClose}><X size={19}/></button></header>
+   {content}
   </section>
  </div>;
 }

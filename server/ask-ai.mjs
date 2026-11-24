@@ -2,13 +2,23 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {askAiPrompt} from './ask-ai-prompt.mjs';
 
 const providerTimeout = 15000;
+const askTokens = 16384;
+const emailChars = 30000;
+const todayInPacific = () => new Intl.DateTimeFormat('en-US',{timeZone:'America/Los_Angeles',weekday:'long',year:'numeric',month:'long',day:'numeric'}).format(new Date());
 const totalTimeout = 40000;
 const temperature = 0.3;
 const maxTokens = 4096;
 
 export function aiConfig(env) {
- return {gemini:env.GEMINI_API_KEY?.trim(),groq:env.GROQ_API_KEY?.trim()};
+ return {gemini:env.GEMINI_API_KEY?.trim(),groq:env.GROQ_API_KEY?.trim(),
+  // Optional: a stronger Gemini model for Ask AI only, such as a Pro model. Bid scans keep the fast default.
+  askModel:/^[a-z0-9.\-]{3,80}$/i.test(env.ASK_AI_GEMINI_MODEL?.trim()||'')?env.ASK_AI_GEMINI_MODEL.trim():undefined,
+  // Same Groq reasoning model as the A2Z MCP (GROQ_MODEL default openai/gpt-oss-120b), with Groq browser search.
+  askGroqModel:/^openai\/gpt-oss-(?:20b|120b)$/.test(env.ASK_AI_GROQ_MODEL?.trim()||'')?env.ASK_AI_GROQ_MODEL.trim():'openai/gpt-oss-120b',
+  webSearch:env.ASK_AI_WEB_SEARCH?.trim()!=='0'};
 }
+
+export const aiModels={gemini:'gemini-3.8-flash',groq:'openai/gpt-oss-120b'};
 
 export function aiEnabled(config) {
  return Boolean(config.gemini||config.groq);
@@ -19,10 +29,12 @@ const providers = [
   key:'gemini',name:'Gemini',model:'gemini-3.8-flash',
   url:'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',
   headers:key=>({'x-goog-api-key':key}),
-  payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false,schema})=>({
+  payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false,schema,reasoning=false,tokens=maxTokens,webSearch=false})=>({
    systemInstruction:{parts:[{text:prompt}]},
    contents:messages.map(({role,content})=>({role:role==='assistant'?'model':'user',parts:[{text:content}]})),
-   generationConfig:{temperature:temp,maxOutputTokens:maxTokens,...(json?{responseMimeType:"application/json",...(schema?{responseJsonSchema:schema}:{})}:{})},
+   ...(webSearch?{tools:[{google_search:{}}]}:{}),
+   generationConfig:{temperature:temp,maxOutputTokens:tokens,...(reasoning?{thinkingConfig:{thinkingLevel:'high'}}:{}),
+    ...(json?{responseMimeType:"application/json",...(schema?{responseJsonSchema:schema}:{})}:{})},
   }),
   answer(data) {
    const candidate=data?.candidates?.[0];
@@ -38,9 +50,10 @@ const providers = [
   key:'groq',name:'Groq',model:'openai/gpt-oss-120b',
   url:'https://api.groq.com/openai/v1/chat/completions',
   headers:key=>({Authorization:'Bearer '+key}),
-  payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false,schema,model:settingsModel})=>({
-   model:settingsModel||'openai/gpt-oss-120b',reasoning_effort:'low',temperature:temp,max_completion_tokens:maxTokens,
+  payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false,schema,model:settingsModel,reasoning=false,tokens=maxTokens,webSearch=false})=>({
+   model:settingsModel||'openai/gpt-oss-120b',reasoning_effort:reasoning&&/gpt-oss/.test(settingsModel||'gpt-oss')?'high':'low',temperature:temp,max_completion_tokens:tokens,
    ...(json?{response_format:schema?{type:'json_schema',json_schema:{name:'bid_invites',strict:true,schema}}:{type:'json_object'}}:{}),
+   ...(webSearch&&/gpt-oss/.test(settingsModel||'gpt-oss')?{tools:[{type:'browser_search'}],tool_choice:'auto'}:{}),
    messages:[{role:'system',content:prompt},...messages],
   }),
   answer(data) {
@@ -66,16 +79,21 @@ function cleanAnswer(text) {
 
 async function attempt(provider,key,messages,signal,fetcher,settings) {
  let response;
+ const url=provider.key==='gemini'&&settings.geminiModel?provider.url.replace('/models/'+provider.model+':','/models/'+settings.geminiModel+':'):provider.url;
  try {
-  response=await fetcher(provider.url,{
+  response=await fetcher(url,{
    method:'POST',headers:{'Content-Type':'application/json',...provider.headers(key)},
-   body:JSON.stringify(provider.payload(messages,{...settings,model:provider.model})),signal,
+   body:JSON.stringify(provider.payload(messages,{...settings,model:settings.groqModel&&provider.key==='groq'&&!provider.optional?settings.groqModel:provider.model})),signal,
   });
  } catch (error) {
   return {reason:signal.aborted||error?.name==='TimeoutError'?'timeout':'network_error'};
  }
  if (!response.ok) {
   const status=response.status;
+  // A model that rejects the reasoning settings or the optional Ask AI model still answers with the defaults.
+  if (status===400&&(settings.reasoning||settings.geminiModel||settings.webSearch)) {
+   return attempt(provider,key,messages,signal,fetcher,{...settings,reasoning:false,geminiModel:undefined,webSearch:false});
+  }
   return {reason:'http_'+status,retry:status===429||status>=500,stop:status>=400&&status<500&&status!==408&&status!==429&&!(provider.optional&&status===404)};
  }
  try {
@@ -94,16 +112,24 @@ async function attempt(provider,key,messages,signal,fetcher,settings) {
 
 async function runProvider(provider,key,messages,budget,fetcher,settings) {
  // A retry shares the provider's 15-second allocation, including backoff.
- const signal=AbortSignal.any([budget,AbortSignal.timeout(provider.timeout||providerTimeout)]);
+ const signal=AbortSignal.any([budget,AbortSignal.timeout(settings.timeoutFor?.(provider)||provider.timeout||providerTimeout)]);
  const first=await attempt(provider,key,messages,signal,fetcher,settings);
  if (!first.retry||signal.aborted) return first;
  try {await delay(1000,undefined,{signal});} catch {return {reason:'timeout'};}
  return attempt(provider,key,messages,signal,fetcher,settings);
 }
 
-export async function runAiChain(config,messages,{budget=AbortSignal.timeout(totalTimeout),fetcher=fetch,attempts=[],bidScan=false,rotateGroq=false,cooldowns,...settings}={}) {
+// Ask AI chain: the MCP's Groq reasoning model with web search first, Gemini with Google Search grounding second,
+// then the small Groq model for outages.
+const askProviders=[
+ {...providers[1],timeout:25000},
+ {...providers[0],timeout:20000},
+ {...providers[1],model:'openai/gpt-oss-20b',timeout:9000,optional:true},
+];
+
+export async function runAiChain(config,messages,{budget=AbortSignal.timeout(totalTimeout),fetcher=fetch,attempts=[],bidScan=false,rotateGroq=false,cooldowns,chain,...settings}={}) {
  let fallbackReason=null;
- for (const provider of bidScan||rotateGroq?bidProviders:providers) {
+ for (const provider of chain||(bidScan||rotateGroq?bidProviders:providers)) {
   const key=config[provider.key];
   if (!key) {
    fallbackReason??=provider.key+'_not_configured';
@@ -115,7 +141,8 @@ export async function runAiChain(config,messages,{budget=AbortSignal.timeout(tot
    continue;
   }
   const result=await runProvider(provider,key,messages,budget,fetcher,settings);
-  if (result.answer!==undefined) return {...result,provider:provider.name,model:provider.model,fallbackReason};
+  const model=settings.groqModel&&provider.key==='groq'&&!provider.optional?settings.groqModel:provider.model;
+  if (result.answer!==undefined) return {...result,provider:provider.name,model,fallbackReason};
   attempts.push({provider:provider.name,model:provider.model,reason:result.reason});
   if (cooldowns&&(result.reason==='timeout'||result.reason==='http_429'||/^http_5/.test(result.reason))) {
    cooldowns.set(provider.model,Date.now()+(result.reason==='http_429'?30000:10000));
@@ -147,7 +174,7 @@ export async function askEmail(config,mailbox,input,fetcher=fetch,{resilient=fal
   const contextBudget=resilient?AbortSignal.any([budget,AbortSignal.timeout(9000)]):budget;
   const [selected,matches]=await Promise.all([
    input.id?waitForContext(mailbox.body(input.id,{includeHtml:false,includeImages:false,includeSubject:true}),contextBudget):{},
-   typeof mailbox.mailSearch==='function'?findRelevantMail(mailbox,question,input.id,contextBudget):undefined,
+   typeof mailbox.mailSearch==='function'?findRelevantMail(mailbox,[question,...history.filter(turn=>turn.role==='user').slice(-1).map(turn=>turn.content)].join(' '),input.id,contextBudget):undefined,
   ]);
   if (!selected&&!matches?.excerpts.length) {
    return contextBudget.aborted ? unavailable :
@@ -155,16 +182,18 @@ export async function askEmail(config,mailbox,input,fetcher=fetch,{resilient=fal
   }
   const message=selected||{};
   const body=message.body||'';
-  const turns=[...history,{role:'user',content:question}];
-  const messages=[{role:'user',content:JSON.stringify({
-   question:turns[0].content,subject:message.subject?.slice(0,500)||'',
-   email:body.slice(0,12000),excerptIncomplete:Boolean(message.truncated||body.length>12000),
+  // Context rides with the latest question so follow-ups reason over the email and fresh mailbox matches.
+  const messages=[...history,{role:'user',content:JSON.stringify({
+   today:todayInPacific(),question,subject:message.subject?.slice(0,500)||'',
+   email:body.slice(0,emailChars),excerptIncomplete:Boolean(message.truncated||body.length>emailChars),
    ...(matches?{mailboxMatches:matches}:{}),
-  })},...turns.slice(1)];
-  const result=await runAiChain(config,messages,{budget,fetcher,attempts,rotateGroq:resilient});
+  })}];
+  const result=await runAiChain(config,messages,{budget,fetcher,attempts,chain:askProviders,
+   reasoning:true,tokens:askTokens,geminiModel:config.askModel,groqModel:config.askGroqModel,webSearch:config.webSearch!==false});
   answeredBy=result.provider;
   fallbackReason=result.fallbackReason;
-  if (result.provider) return {status:200,data:{answer:result.answer,provider:result.provider,backup:result.provider==='Groq'}};
+  if (result.provider) return {status:200,data:{answer:result.answer,provider:result.provider,model:result.model,
+   backup:result.model!==(config.askGroqModel||askProviders[0].model)}};
   if (resilient) {
    const evidence=[
     ...(body?[{subject:message.subject||'Selected email',excerpt:body.slice(0,1200)}]:[]),
@@ -197,16 +226,16 @@ async function findRelevantMail(mailbox,question,selectedId,budget) {
  if (!keywords.length) return {excerpts:[],coverage:'no_search_terms'};
  const signal=AbortSignal.any([budget,AbortSignal.timeout(10000)]);
  try {
-  const result=await waitForContext(mailbox.mailSearch({query:keywords.join(' ')},16,true),signal);
+  const result=await waitForContext(mailbox.mailSearch({query:keywords.join(' ')},24,true),signal);
   if (!result) return {excerpts:[],coverage:'search_timed_out'};
   const score=row=>keywords.reduce((sum,word)=>sum+Number((row.subject+' '+row.from).toLowerCase().includes(word)),0);
   const rows=result.mail.filter(row=>row.id!==selectedId)
-   .map(row=>({row,score:score(row)})).sort((a,b)=>b.score-a.score).slice(0,6);
+   .map(row=>({row,score:score(row)})).sort((a,b)=>b.score-a.score||String(b.row.date).localeCompare(String(a.row.date))).slice(0,8);
   const excerpts=await waitForContext(Promise.all(rows.map(async ({row})=>{
    let body='';
    try {
     const result=await mailbox.body(row.id,{includeHtml:false,includeImages:false});
-    body=(result?.body||'').slice(0,2400);
+    body=(result?.body||'').slice(0,4000);
    } catch { /* Still provide authenticated envelope metadata. */ }
    return {subject:row.subject.slice(0,300),from:row.from.slice(0,320),date:row.date,folder:row.folder,excerpt:body};
   })),signal);

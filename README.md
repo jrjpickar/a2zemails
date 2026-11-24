@@ -211,3 +211,22 @@ The directory is stored in the `team-directory` Netlify Blobs store. `IONOS_ALLO
 ## Older mail and bid invitations
 
 Messages skipped by the preview budget (for example invites with large plan sets) now get a 6 KB text preview, so rules and Groq classify them from the body and not only the subject. At the end of any mail list, **Load older mail from IONOS** pages 50 older messages at a time from that folder. Workspace views such as Bid Invitations page the Inbox. Loaded pages stay in the list after a refresh. Press **⌘/Ctrl+Enter** to send an open draft.
+
+## Ask AI reasoning
+
+Ask AI now reasons before answering: it connects replies to the original request, does date math from today's Pacific date, labels inferences, and flags estimating risks. It uses Gemini high thinking and Groq `gpt-oss-120b` with high reasoning effort, sees up to 30,000 characters of the open email and eight mailbox matches, and searches again on each follow-up. Optional: set `ASK_AI_GEMINI_MODEL` (for example a Gemini Pro model) to use a stronger model for Ask AI only. If the model rejects that setting, Ask AI falls back to the default automatically. Deeper answers take longer, so the function timeout must allow about 40 seconds.
+
+## Email CSV export
+
+Exports include every readable text part of each email (all plain text parts, or the HTML converted to text when there is no plain part), up to 2.5 MB of text per email. While an export runs you can **Pause export**, **Resume export**, or **Download current rows** to save what is ready so far. Excel shows at most 32,767 characters per cell; the CSV still holds the full text.
+
+## Senior admin console
+
+The people icon next to a senior admin's name opens the **Admin console**:
+
+- **Team**: onboard, offboard, rename, sign out everywhere and HighLevel passwords (see Team access above).
+- **Sorting keywords**: add a word or phrase and the category it sorts into, matched in the subject or in the subject and message text. Keywords apply to every mailbox, run before the built-in rules and the AI sorter, and take effect within 30 seconds. Use General to keep a phrase out of the other categories. Stored in the `admin-settings` Netlify Blobs store.
+- **Activity and stats**: active users, emails sent, AI questions, CSV exports, failed sign-ins and server errors for today or the last 7, 14 or 30 days, per user and per day, plus recent events. Kept for 30 days in the `activity` store. Opens count once per 10 minutes per user. No email content is logged.
+- **Health checks**: IONOS IMAP and SMTP with your mailbox, Netlify Blobs, Groq, Gemini, HighLevel sign-in and contacts, Estimating Desk, your last bid scan and missing settings. Results show status, timing and safe detail only.
+
+Ask AI uses the same Groq reasoning model as the A2Z MCP (`openai/gpt-oss-120b`, high reasoning) with Groq browser search first, then Gemini with Google Search grounding. Optional: `ASK_AI_GROQ_MODEL` (`openai/gpt-oss-120b` or `openai/gpt-oss-20b`), and `ASK_AI_WEB_SEARCH=0` turns web search off.

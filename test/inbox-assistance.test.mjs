@@ -12,44 +12,50 @@ const mailbox={async body(id,options) {
  return {subject:'Demo bid',body:'Bid due Friday.',html:'<img src="external">',images:{fixture:'attachment'}};
 }};
 
-test('Ask AI uses Gemini first and falls back to Groq for errors and empty answers',async ()=>{
- const config={gemini:'fake-gemini',groq:'fake-groq'};
+test('Ask AI uses the MCP Groq reasoning model with web search first and falls back to Gemini',async ()=>{
+ const config={gemini:'fake-gemini',groq:'fake-groq',askGroqModel:'openai/gpt-oss-120b',webSearch:true};
  for (const failure of ['none','http','timeout','empty']) {
   const calls=[];
   const result=await askEmail(config,mailbox,question,async (url,options)=>{
    calls.push(url);
    const body=JSON.parse(options.body);
-   if (url.includes('googleapis.com')) {
-    assert.equal(options.headers['x-goog-api-key'],config.gemini);
-    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text),{
-     question:question.question,subject:'Demo bid',email:'Bid due Friday.',excerptIncomplete:false,
-    });
+   if (url.includes('groq.com')) {
+    assert.equal(options.headers.Authorization,'Bearer '+config.groq);
+    assert.equal(body.model,'openai/gpt-oss-120b');
+    assert.equal(body.reasoning_effort,'high');
+    assert.deepEqual(body.tools,[{type:'browser_search'}]);
+    const {today,...context}=JSON.parse(body.messages.at(-1).content);
+    assert.match(today,/\d{4}/);
+    assert.deepEqual(context,{question:question.question,subject:'Demo bid',email:'Bid due Friday.',excerptIncomplete:false});
     if (failure==='http') return new Response(null,{status:429});
     if (failure==='timeout') throw new DOMException('Timeout','TimeoutError');
-    return Response.json(failure==='empty'?{}:{candidates:[{finishReason:'STOP',content:{parts:[{thought:true,text:'Private'},{text:'Friday'}]}}]});
+    return Response.json(failure==='empty'?{}:{choices:[{message:{content:'Friday'}}]});
    }
-   assert.equal(options.headers.Authorization,'Bearer '+config.groq);
-   return Response.json({choices:[{message:{content:'Friday'}}]});
+   assert.equal(options.headers['x-goog-api-key'],config.gemini);
+   assert.deepEqual(body.tools,[{google_search:{}}]);
+   assert.equal(body.generationConfig.thinkingConfig.thinkingLevel,'high');
+   return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{thought:true,text:'Private'},{text:'Friday'}]}}]});
   });
-  assert.deepEqual(result,{status:200,data:{answer:'Friday',provider:failure==='none'?'Gemini':'Groq',backup:failure!=='none'}});
+  assert.deepEqual(result,{status:200,data:{answer:'Friday',provider:failure==='none'?'Groq':'Gemini',
+   model:failure==='none'?'openai/gpt-oss-120b':'gemini-3.8-flash',backup:failure!=='none'}});
   assert.equal(calls.length,{none:1,http:3,timeout:2,empty:2}[failure]);
  }
  assert.equal((await askEmail(config,{body:async()=>null},question,()=>assert.fail('Provider called'))).status,404);
 });
 
-test('Gemini retries 503 once before Groq and both receive the same prompt, settings and history',async ()=>{
+test('Groq retries 503 once before Gemini and both receive the same prompt, settings and history',async ()=>{
  const requests=[];
  const history=[{role:'user',content:'What is this?'},{role:'assistant',content:'A demo bid.'}];
  const result=await askEmail({gemini:'fake',groq:'fake'},mailbox,{...question,history},async (url,options)=>{
   const payload=JSON.parse(options.body);
   requests.push(payload);
-  if (url.includes('googleapis.com')) return new Response(null,{status:503});
-  return Response.json({choices:[{message:{content:'<think>hidden</think> As an AI, Friday'}}]});
+  if (url.includes('groq.com')) return new Response(null,{status:503});
+  return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:'Friday'}]}}]});
  });
- assert.deepEqual(result,{status:200,data:{answer:'Friday',provider:'Groq',backup:true}});
+ assert.deepEqual(result,{status:200,data:{answer:'Friday',provider:'Gemini',model:'gemini-3.8-flash',backup:true}});
  assert.equal(requests.length,3);
  assert.deepEqual(requests[0],requests[1]);
- const [gemini,,groq]=requests;
+ const [groq,,gemini]=requests;
  assert.equal(gemini.systemInstruction.parts[0].text,askAiPrompt);
  assert.deepEqual(groq.messages[0],{role:'system',content:askAiPrompt});
  assert.deepEqual(gemini.contents.map(({role,parts})=>({
@@ -57,6 +63,19 @@ test('Gemini retries 503 once before Groq and both receive the same prompt, sett
  })),groq.messages.slice(1));
  assert.equal(gemini.generationConfig.temperature,groq.temperature);
  assert.equal(gemini.generationConfig.maxOutputTokens,groq.max_completion_tokens);
+ assert.equal(groq.reasoning_effort,'high');
+});
+
+test('Ask AI drops reasoning and web search settings once when a provider rejects them',async ()=>{
+ const bodies=[];
+ const result=await askEmail({groq:'fake',webSearch:true},mailbox,question,async (_url,options)=>{
+  const body=JSON.parse(options.body);
+  bodies.push(body);
+  return body.tools?new Response(null,{status:400}):Response.json({choices:[{message:{content:'Friday'}}]});
+ });
+ assert.equal(result.data.answer,'Friday');
+ assert.equal(bodies[1].tools,undefined);
+ assert.equal(bodies[1].reasoning_effort,'low');
 });
 
 test('Provider request and authentication errors stop fallback',async ()=>{
@@ -66,7 +85,8 @@ test('Provider request and authentication errors stop fallback',async ()=>{
    count++;
    return new Response('private provider response',{status});
   });
-  assert.equal(count,1);
+  // A 400 retries once without reasoning settings, then stops.
+  assert.equal(count,status===400?2:1);
   assert.equal(result.status,502);
   assert.match(result.data.error,status===400?/submit/:/authenticate/);
   assert.doesNotMatch(result.data.error,/private provider response/);

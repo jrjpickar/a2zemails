@@ -6,7 +6,12 @@ import { safeRasterType,signatureImage } from './signature-image.mjs';
 import { MAX_STAGED_BYTES } from './staged-attachments.mjs';
 import { mailAttachments } from './mail-attachments.mjs';
 import { groqCategories } from './groq-classification.mjs';
-import { classify,matchProject } from '../src/model.mjs';
+import { classify as classifyBase, keywordCategory } from '../src/model.mjs';
+
+// The project list in src/model.mjs is sandbox sample data (Harbor Point, Westfield, Riverside, Civic Center).
+// Matching real mail against it tagged any email naming Riverside or Westfield as an active project, including bid invites.
+// Live mail gets no project until a real project source is connected.
+const matchProject = () => '';
 
 const mailboxAddress = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/u;
 const messageId = /^<[^<>\s]+>$/u;
@@ -98,6 +103,9 @@ function searchCriteria(query,scope={}) {
 }
 
 const detailLimit = 1024 * 1024;
+// Export limits keep each JSON page under the 6 MB Netlify response cap.
+const exportTextBytes = 2.5 * 1024 * 1024;
+const exportPageTextBytes = 1024 * 1024;
 
 function messageLocation(id) {
  return typeof id === 'string' && id.length <= 2048 && id.match(/^(.+):(\d+):([1-9]\d*)$/s);
@@ -218,6 +226,8 @@ async function readPart(imap,uid,part,limit,chunkSize) {
 }
 
 export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, transport=nodemailer.createTransport,fetchGroq}={}) {
+ // Senior admin sorting keywords travel with the mailbox config.
+ const classify=(subject,body,from)=>classifyBase(subject,body,from,{},config.keywords||[]);
  const smtp = transport(config.smtp);
  async function saveSent(message) {
   const imap = new Imap(config.imap);
@@ -302,6 +312,10 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   for (const row of mail) {
    const category = labels.get(row.id);
    if (!category || category===row.category) continue;
+   // Rules found bid invite wording. Never let the model demote it to General and hide a bid.
+   if (row.category==='Bid Invitations' && category==='General') continue;
+   // Admin keywords are explicit company rules and always win over the model.
+   if (keywordCategory(row.subject,row.body,config.keywords||[])) continue;
    row.category = category;
    row.due = category==='Bid Invitations' ? bidDue(row.subject,row.body) : undefined;
   }
@@ -335,6 +349,29 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    replyTo:addressList(envelope.replyTo),messageId:envelope.messageId||'',inReplyTo:envelope.inReplyTo||'',
    flags:[...flags],bytes:item.size||0,attachments:attachedFiles(item.bodyStructure),
   };
+ }
+
+ // Full readable text for exports: every inline text/plain part in order, or every HTML part converted to text.
+ async function fullText(imap,uid,structure) {
+  const parts=textParts(structure);
+  const plain=parts.filter(part=>part.type==='text/plain');
+  const chosen=plain.length?plain:parts.filter(part=>part.type==='text/html');
+  const pieces=[];
+  let bytes=0, truncated=chosen.length>40;
+  for (const {part,type} of chosen.slice(0,40)) {
+   if (bytes>=exportTextBytes) {truncated=true;break;}
+   const result=await readPart(imap,uid,part,exportTextBytes-bytes);
+   if (!result) continue;
+   bytes+=result.raw.length;
+   truncated||=result.truncated;
+   let text=result.raw.toString('utf8');
+   if (type==='text/html') {
+    const mime='Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n'+result.raw.toString('base64');
+    text=(await parser(mime,{skipHtmlToText:false,skipImageLinks:true}).catch(()=>null))?.text||'';
+   }
+   if (text.trim()) pieces.push(text.replace(/\s+$/,''));
+  }
+  return {body:pieces.join('\n\n'),truncated,bytes};
  }
 
  const mailbox = {
@@ -442,16 +479,36 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     bytes+=estimate;
     count++;
    }
-   const page=result.mail.slice(0,count);
-   const mail=await Promise.all(page.map(async row=>{
-    const message=await mailbox.body(row.id,{includeHtml:false,includeImages:false});
+   // One read-only connection per page. Every text part is exported, not only the first one.
+   const texts=new Map();
+   let processed=0;
+   let textBytes=0;
+   const candidates=result.mail.slice(0,count);
+   if (candidates.length) await readFolder(input.path,async imap=>{
+    const generation=String(imap.mailbox.uidValidity);
+    for (const row of candidates) {
+     if (processed&&textBytes>=exportPageTextBytes) break;
+     processed++;
+     const [,rowGeneration,uid]=row.id.match(/:(\d+):(\d+)$/)||[];
+     if (rowGeneration!==generation) continue;
+     const item=await imap.fetchOne(uid,{bodyStructure:true},{uid:true});
+     if (!item?.bodyStructure) continue;
+     const text=await fullText(imap,uid,item.bodyStructure);
+     textBytes+=text.bytes;
+     texts.set(row.id,text);
+    }
+   });
+   count=processed;
+   const page=candidates.slice(0,count);
+   const mail=page.map(row=>{
+    const message=texts.get(row.id);
     if (!message) return {...row,bodyStatus:'Message no longer available'};
-    const body=message.body||'';
+    const body=message.body;
     const category=classify(row.subject,body,row.from);
     return {...row,body,category,project:matchProject(row.subject+' '+body),
      due:category==='Bid Invitations'?bidDue(row.subject,body):undefined,
-     bodyStatus:message.truncated?'Truncated by mailbox body limit':'Complete'};
-   }));
+     bodyStatus:message.truncated?'Truncated at the 2.5 MB export limit':'Complete'};
+   });
    const consumed=page.at(-1)?.id.match(/:(\d+):(\d+)$/);
    const next=count<result.mail.length&&consumed
     ? [{path:input.path,generation:consumed[1],before:Number(consumed[2])}] : result.next;

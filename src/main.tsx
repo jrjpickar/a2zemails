@@ -14,7 +14,7 @@ import {MessageText} from './message-text';
 import {AskAi} from './ask-ai';
 import {BidImportReport} from './bid-import-report';
 import {RecipientInput,type Contact} from './recipient-input';
-import {TeamAccess} from './team-access';
+import {AdminConsole} from './admin-console';
 import {rememberedSession,hostedRequest,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
 import './style.css';
 import './theme.css';
@@ -282,6 +282,25 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const [allSelected,setAllSelected]=useState(false);
  const [exportCount,setExportCount]=useState<number|null>(null);
  const stopExport=React.useRef(false);
+ const [exportPaused,setExportPaused]=useState(false);
+ const pauseExport=React.useRef(false);
+ const resumeExport=React.useRef<(()=>void)|null>(null);
+ const exportParts=React.useRef<{parts:string[];view:string;count:number}|null>(null);
+ function setExportPause(paused:boolean) {
+  pauseExport.current=paused;
+  setExportPaused(paused);
+  if (!paused) {resumeExport.current?.();resumeExport.current=null;}
+ }
+ async function waitWhilePaused() {
+  while (pauseExport.current&&!stopExport.current) await new Promise<void>(resolve=>{resumeExport.current=resolve;});
+ }
+ function downloadExportSoFar() {
+  const current=exportParts.current;
+  if (!current) return;
+  downloadMailCsv(current.parts.slice(),current.view+'-partial');
+  setToast('Downloaded '+current.count+' email'+(current.count===1?'':'s')+' exported so far.');
+ }
+ function cancelExport() {stopExport.current=true;setExportPause(false);}
  const exportRunning=React.useRef(false);
 
  const inbox=mail.filter(m=>m.folder==='Inbox');
@@ -314,11 +333,11 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const searchScopeLabel=[scope.folder||'All folders',searchFilters.period==='any'?'Any time':searchFilters.period==='custom'?
   (scope.fromDate||'Any start')+' to '+(scope.toDate||'Any end'):'Last '+searchFilters.period+' days',
   {text:'Headers and body',from:'Sender',subject:'Subject',body:'Message body'}[scope.field]].join(' · ');
- useEffect(()=>{setAllSelected(false);stopExport.current=true;},[nav,query,filter,projectFilter,searchKey]);
+ useEffect(()=>{setAllSelected(false);cancelExport();},[nav,query,filter,projectFilter,searchKey]);
  function inFolder(message:Message, folder:string) {
   if (folder.startsWith(temperaturePrefix)) return message.folder==='Inbox'&&message.temperature===folder.slice(temperaturePrefix.length);
   if (folder.startsWith(customFolderPrefix)) return message.folder===folder.slice(customFolderPrefix.length);
-  if (folder==='Active Projects') return Boolean(message.project)&&!['Trash','Spam'].includes(message.folder);
+  if (folder==='Active Projects') return Boolean(message.project)&&message.category!=='Bid Invitations'&&!['Trash','Spam'].includes(message.folder);
   if (categories.includes(folder)) return message.category===folder&&!['Trash','Spam'].includes(message.folder);
   return message.folder===folder;
  }
@@ -428,13 +447,16 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   if (exportRunning.current) return;
   exportRunning.current=true;
   stopExport.current=false;
+  setExportPause(false);
   setExportCount(0);
   const parts=[mailCsvHeader];
   let count=0;
+  exportParts.current={parts,view:dashboard?'Inbox':activeSearch?'Search':viewName,count:0};
   const draftsView=nav==='Drafts'&&!activeSearch&&!dashboard;
   function append(rows:Message[]) {
    parts.push(mailCsvRows(rows));
    count+=rows.length;
+   if (exportParts.current) exportParts.current.count=count;
    setExportCount(count);
   }
   const selection=activeSearch?list:localList;
@@ -447,6 +469,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   try {
    if (draftsView) {
     for (const draft of draftList) {
+     await waitWhilePaused();
      if (stopExport.current) return;
      const local=state.drafts.find(item=>item.id===draft.id);
      const details=local||(hosted?await liveRequest('draft&id='+encodeURIComponent(draft.id)):null);
@@ -472,6 +495,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     for (const folder of chosen) {
      let positions:SearchCursor[]|undefined;
      do {
+      await waitWhilePaused();
       if (stopExport.current) return;
       const data:{mail:Message[];next:SearchCursor[]}=await liveRequest('mail-export-page',{
        path:folder.path,query:dashboard?'':activeSearch,positions,temperature:!activeSearch&&Boolean(temperatureName),
@@ -492,7 +516,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     setToast('Exported '+count+' email'+(count===1?'':'s')+'.');
    }
   } catch(error) {setToast(error instanceof Error?error.message:'CSV export could not complete.');}
-  finally {exportRunning.current=false;setExportCount(null);}
+  finally {exportRunning.current=false;exportParts.current=null;setExportPause(false);setExportCount(null);}
  }
  const currentRow=row&&list.some(m=>m.id===row.id)?row:undefined;
  const related=currentRow?threadFor(mail,currentRow) as Message[]:[];
@@ -905,7 +929,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   const count=mail.filter(message=>message.folder===folder&&message.unread).length;
   return <button key={key} className={nav===key&&!query?'active':''} onClick={()=>go(key)}><FolderKanban size={16}/><span>{folder}</span>{count>0&&<b>{count}</b>}</button>;
  })}</section>}</div>
- <div className="sidebar-end"><div className="env"><i/> {liveToken ? connection : 'Sandbox workspace'}</div><div className="profile"><div className="profile-avatar">{initials(userName).toUpperCase()}</div><div><b title={account||undefined}>{userName}</b><small>{profile?.admin?'Senior admin':'A2Z Construction'}</small></div>{profile?.admin&&hosted&&<button title="Team access" aria-label="Team access" onClick={()=>setTeamOpen(true)}><Users size={17}/></button>}<button title="Keyboard shortcuts" onClick={()=>setHelp(true)}><MoreHorizontal size={17}/></button></div></div>
+ <div className="sidebar-end"><div className="env"><i/> {liveToken ? connection : 'Sandbox workspace'}</div><div className="profile"><div className="profile-avatar">{initials(userName).toUpperCase()}</div><div><b title={account||undefined}>{userName}</b><small>{profile?.admin?'Senior admin':'A2Z Construction'}</small></div>{profile?.admin&&hosted&&<button title="Admin console" aria-label="Admin console" onClick={()=>setTeamOpen(true)}><Users size={17}/></button>}<button title="Keyboard shortcuts" onClick={()=>setHelp(true)}><MoreHorizontal size={17}/></button></div></div>
  </aside>
  <main>
  <header className={'topbar'+((mailFeatures.askAi||!liveToken)?' topbar-with-ai':'')}><button className="icon nav-toggle" aria-label="Toggle navigation" onClick={()=>setSide(!side)}><Menu size={20}/></button><div className="crumb"><PanelLeft size={16}/> <span>Workspace</span><span className="slash">/</span><b>{query?'Search':viewName}</b></div>{(mailFeatures.askAi||!liveToken)&&<AskAi toolbar prefill={query}
@@ -920,7 +944,10 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <h1>Command Center</h1>
  <div className="mail-export-toolbar">
   <button type="button" className="project-tag" disabled={exportCount!==null} onClick={()=>void exportSelection(true)}><Download size={16}/> Export Inbox CSV</button>
-  {exportCount!==null&&<><span role="status">{exportCount} rows ready</span><button type="button" className="project-tag" onClick={()=>{stopExport.current=true}}>Cancel export</button></>}
+  {exportCount!==null&&<><span role="status">{exportCount} rows ready{exportPaused?' · Paused':''}</span>
+   <button type="button" className="project-tag" onClick={()=>setExportPause(!exportPaused)}>{exportPaused?'Resume export':'Pause export'}</button>
+   <button type="button" className="project-tag" disabled={!exportCount} onClick={downloadExportSoFar}>Download current rows</button>
+   <button type="button" className="project-tag" onClick={cancelExport}>Cancel export</button></>}
  </div>
  <div className="metrics">{([
   [Mail,'Unread incoming',unreadIncoming,'Incoming'],
@@ -948,7 +975,10 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <div className="mail-export-toolbar">
   <label><input type="checkbox" checked={allSelected} onChange={event=>setAllSelected(event.target.checked)} disabled={exportCount!==null}/> Select all in this view</label>
   <button type="button" className="project-tag" disabled={!allSelected||exportCount!==null} onClick={()=>void exportSelection()}><Download size={16}/> Export email CSV</button>
-  {exportCount!==null&&<><span role="status">{exportCount} rows ready</span><button type="button" className="project-tag" onClick={()=>{stopExport.current=true}}>Cancel export</button></>}
+  {exportCount!==null&&<><span role="status">{exportCount} rows ready{exportPaused?' · Paused':''}</span>
+   <button type="button" className="project-tag" onClick={()=>setExportPause(!exportPaused)}>{exportPaused?'Resume export':'Pause export'}</button>
+   <button type="button" className="project-tag" disabled={!exportCount} onClick={downloadExportSoFar}>Download current rows</button>
+   <button type="button" className="project-tag" onClick={cancelExport}>Cancel export</button></>}
  </div>
  <div className="list-toolbar">{marked.length?<><button onClick={()=>setMarked([])}>{marked.length} selected ×</button><button title="Archive selected" className="icon" onClick={()=>move(marked,'Archive')}><Archive size={16}/></button><button title="Delete selected" className="icon" onClick={()=>move(marked,'Trash')}><Trash2 size={16}/></button></>:<><div className="tabs">{['All mail','Unread'].map(f=><button key={f} className={filter===f?'on':''} onClick={()=>{setFilter(f);setLimit(60)}} disabled={!!query}>{f}{f==='Unread'&&nav==='Inbox'&&<span>{unreadIncoming}</span>}</button>)}</div><button className={'icon '+(!['All mail','Unread'].includes(filter)?'accent':'')} title="Filter messages" onClick={()=>setMenu(menu==='filters'?'':'filters')}><SlidersHorizontal size={17}/></button></>}
  {menu==='filters'&&<div className="popover filters">{['All mail','Unread','Starred','Attachments','Incoming','Urgent'].map(f=><button key={f} onClick={()=>{setFilter(f);setMenu('')}}>{f}{filter===f&&<Check size={14}/>}</button>)}</div>}</div>
@@ -1064,7 +1094,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  </div>}
  {livePreview&&<AttachmentPreview source={livePreview} request={liveRequest} close={()=>setLivePreview(null)}/>}
  {preview&&<div className="modal-back centered" onClick={()=>setPreview(null)}><section className="attachment-preview" role="dialog" aria-label="Attachment preview" onClick={e=>e.stopPropagation()}><header><b>{preview}</b><button className="icon" title="Close preview" onClick={()=>setPreview(null)}><X size={19}/></button></header><div className="preview-sheet"><div className="eyebrow">A2Z CONSTRUCTION SERVICES / DEMO DOCUMENT</div><FileText size={42}/><h2>{preview.replace(/\.pdf$/i,'')}</h2><p>This is a simulated attachment for the sandbox.</p></div><footer><a href="/samples/demo.pdf" download={preview}><Download size={16}/> Download sample PDF</a></footer></section></div>}
- {teamOpen&&liveToken&&<TeamAccess self={account} request={(path,body)=>liveRequest(path,body)} onClose={()=>setTeamOpen(false)}
+ {teamOpen&&liveToken&&<AdminConsole self={account} request={(path,body)=>liveRequest(path,body)} onClose={()=>setTeamOpen(false)}
   onChanged={()=>void liveRequest('profile').then((data:{profile?:Profile})=>{if(data.profile)setProfile(data.profile)}).catch(()=>{})}/>}
  {help&&<div className="modal-back centered" onClick={()=>setHelp(false)}><section className="shortcuts" role="dialog" aria-label="Keyboard shortcuts" onClick={e=>e.stopPropagation()}><header><b>Keyboard shortcuts</b><button className="icon" title="Close shortcuts" onClick={()=>setHelp(false)}><X size={19}/></button></header>{[['C','Compose'],['/','Search'],['⌘R','Reply'],['⌘⇧R','Refresh mailbox'],['⌘F','Forward'],['⌘/Ctrl+Enter','Send open draft'],['E','Archive selected message'],['Esc','Close dialog or message'],['?','Show shortcuts']].map(([k,l])=><p key={k}><kbd>{k}</kbd> {l}</p>)}</section></div>}
  {toast&&<div className="toast" role="status"><Check size={17}/>{toast}</div>}
