@@ -5,6 +5,7 @@ import {contactsConfig,searchContacts,mailboxTemperatures,temperatureConfig} fro
 import {aiConfig,aiEnabled,aiModels,askEmail} from '../../server/ask-ai.mjs';
 import {adminConsole,healthChecks} from '../../server/admin-console.mjs';
 import {aiLabelStore,pacificTime,sortHours} from '../../server/ai-sort.mjs';
+import {noteStore,notesConfig} from '../../server/ghl-notes.mjs';
 import nodemailer from 'nodemailer';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { stagedAttachments, stagedFiles, CHUNK_BYTES, MAX_DOWNLOAD_BYTES, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
@@ -58,7 +59,7 @@ async function readInput(request, limit) {
  catch { throw new TypeError('Invalid request body.'); }
 }
 
-export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments,lookupContacts=searchContacts,directoryFactory=teamDirectory,adminFactory=adminConsole,fetcher=fetch,smtpFactory=nodemailer.createTransport,labelsFactory=aiLabelStore}={}) {
+export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments,lookupContacts=searchContacts,directoryFactory=teamDirectory,adminFactory=adminConsole,fetcher=fetch,smtpFactory=nodemailer.createTransport,labelsFactory=aiLabelStore,notesFactory=noteStore}={}) {
  const enabled = env.A2Z_MODE==='live';
  const allowed = new Set((env.IONOS_ALLOWED_MAILBOXES||'').split(',').map(value=>value.trim().toLowerCase()).filter(Boolean));
  const admins = seniorAdmins(env);
@@ -67,6 +68,8 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  const directory = ready ? directoryFactory(env) : null;
  const admin = ready ? adminFactory() : null;
  const aiLabels = ready ? labelsFactory() : null;
+ const notes = ready ? notesFactory() : null;
+ const notesSetup = notesConfig(env);
  const highLevelSetup = ready ? createHighLevelLogin(env,allowed,{lookup:email=>directory.credential(email)}) : null;
  const highLevel=highLevelSetup?.login;
  const contacts=ready?contactsConfig(env):null;
@@ -154,6 +157,19 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
      ': '+sorted+' newly sorted'+(failed.length?'. Failed: '+failed.map(item=>item.email+' ('+item.detail+')').join(', '):'')+
      (skipped.length?'. Skipped (no saved password): '+skipped.map(item=>item.email).join(', '):'');
     return {status:failed.length||ageHours>20?'fail':skipped.length?'warn':'ok',detail};
+   },
+   'HighLevel email notes':async()=>{
+    const settings=await notes.settings();
+    if (!settings.enabled) return settings.disabledReason?{status:'fail',detail:'Turned off by the safety check: '+settings.disabledReason}:{status:'ok',detail:'Turned off in Admin console > HighLevel notes'};
+    if (!notesSetup) return {status:'fail',detail:'Set GHL_CONVERSATIONS_PIT_TOKEN, GHL_CONTACTS_PIT_TOKEN and GHL_CONTACTS_LOCATION_ID'};
+    // Read-only probe with the write token. Confirms the token and its conversations.readonly scope.
+    await timed('https://services.leadconnectorhq.com/conversations/search?locationId='+encodeURIComponent(notesSetup.locationId)+'&limit=1',
+     {headers:{Authorization:'Bearer '+notesSetup.token,Version:'2021-04-15',Accept:'application/json'}});
+    const run=await notes.lastRun();
+    if (!run) return {status:'warn',detail:'Token works. No notes posted yet. Next run at 9 AM or 3 PM Pacific.'};
+    const posted=run.results.reduce((sum,item)=>sum+(item.posted||0),0);
+    const problems=run.results.filter(item=>item.status==='failed'||item.status==='partial');
+    return {status:problems.length?'warn':'ok',detail:'Last run posted '+posted+' notes'+(problems.length?'. Issues: '+problems.map(item=>item.email+' ('+(item.detail||item.status)+')').join(', '):'')};
    },
    'Configuration':async()=>missing.length?{status:'warn',detail:'Missing: '+missing.join(', ')}:
     {detail:allowed.size+' allowed mailboxes, '+admins.size+' senior admin(s)'},
@@ -257,6 +273,15 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     return reply({...activity,team:users.map(({email,name,status,admin:isAdmin})=>({email,name,status,admin:isAdmin}))});
    }
    if (action==='admin-health' && request.method==='GET') return reply(await healthChecks(healthFor(login)));
+   if (action==='admin-notes' && request.method==='GET') {
+    return reply({settings:await notes.settings(),lastRun:await notes.lastRun(),
+     setup:{writeToken:Boolean(env.GHL_CONVERSATIONS_PIT_TOKEN?.trim()),readToken:Boolean(env.GHL_CONTACTS_PIT_TOKEN?.trim()),ready:Boolean(notesSetup)}});
+   }
+   if (action==='admin-notes' && request.method==='POST') {
+    const settings=await notes.saveSettings(await readInput(request,2048),login.email);
+    await admin.record(login.email,'settings');
+    return reply({settings});
+   }
    if (action==='admin-sort-now' && request.method==='POST') {
     const token=env.BID_DRY_RUN_TOKEN?.trim();
     if (!env.URL||!token||token.length<32) return reply({error:'Set URL and BID_DRY_RUN_TOKEN to run AI sorting.'},503);

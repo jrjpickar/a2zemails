@@ -319,3 +319,6 @@ select, kbd, .project-tag, .gray, .attachments h3 span, .chips button { backgrou
 .health-fail .health-dot { background: #b42318; }
 .admin-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .admin-actions .project-tag { margin-left: 0; cursor: pointer; }
+.note-skip { display: flex; flex-wrap: wrap; gap: 6px 14px; border: 1px solid var(--line); border-radius: var(--theme-radius); padding: 8px 12px; }
+.note-skip label { display: inline-flex; gap: 6px; align-items: center; font-weight: 400; }
+.note-safety { padding: 8px 10px; border-left: 3px solid #2e7d32; background: var(--raised); }

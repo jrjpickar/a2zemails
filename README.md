@@ -236,3 +236,23 @@ Ask AI uses the same Groq reasoning model as the A2Z MCP (`openai/gpt-oss-120b`,
 `ai-sort-scheduled` runs at 9 AM and 3 PM Pacific (Netlify schedules are UTC, so it fires at 16, 17, 22 and 23 UTC and only acts at 9 or 3 Pacific, which handles daylight saving time). It starts the `ai-sort-background` function, which signs in to every active mailbox that has a saved password (Admin console > Team > Set HighLevel password, `GHL_IONOS_MAILBOX_PASSWORDS`, or `MCP_IONOS_PASSWORD`), sorts recent Inbox mail with the AI and your keywords, and saves the AI categories in the `ai-labels` Netlify Blobs store. When anyone opens the inbox, saved categories apply right away and only newer mail goes to the AI. Needs `URL`, `BID_DRY_RUN_TOKEN` and `GROQ_API_KEY`. Admin console > Health checks shows the last run and has **Run AI sorting now**.
 
 Sent attachments: messages you just sent open their attachments from the IONOS Sent copy, and the app swaps in that copy a few seconds after sending. File parts without a file name now show as attachments.
+
+## HighLevel email notes
+
+At each 9 AM and 3 PM run, new emails whose sender (received) or recipient (sent) is an existing HighLevel contact get a short AI summary posted as an internal comment in that contact's conversation. Summaries keep prices, amounts and dates and leave out attachments. Contacts are matched by exact email only and are never created. Each address is looked up once and cached for 7 days (misses for 1 day), 20 addresses per search. An email is posted once per contact even if several mailboxes received it. Turn it on in **Admin console > HighLevel notes** and choose received, sent or both, and categories to skip.
+
+| Key | Scopes | Used for |
+| --- | --- | --- |
+| `GHL_CONVERSATIONS_PIT_TOKEN` (new) | `conversations.readonly`, `conversations.write`, `conversations/message.write`, `conversations/message.readonly` | Find or open the contact's conversation, post the internal comment, and read the first note back to confirm it is an internal comment |
+| `GHL_CONTACTS_PIT_TOKEN` (existing) | `contacts.readonly` | Exact email match to existing contacts |
+| `GHL_CONTACTS_LOCATION_ID` (existing) | | The sub-account to post in |
+
+Summaries use Groq `openai/gpt-oss-20b` with low reasoning, eight emails per call.
+
+Safety: the request body is built from a fixed allowlist (`type: InternalComment`, contact, conversation, message) with no phone, email or channel fields. The first note of every run is read back; if HighLevel reports any type other than an internal comment, or the read-back fails, posting stops and the feature turns itself off with the reason shown in the Admin console and Health checks. Use **Test contact email** to post to one contact you own before turning it on for everyone.
+
+## AI efficiency
+
+- Sorting: low reasoning effort; mail already decided by admin keywords or saved 9 AM / 3 PM labels is not sent to the model.
+- Ask AI: medium reasoning for quick lookups, high only for analysis questions (compare, risk, totals, timelines). Questions about the open email skip the mailbox-wide search. Related-mail excerpts are read over one IMAP connection, with quoted history removed.
+- Ask AI can answer about the open email or the whole mailbox (switch at the top of the dialog).

@@ -54,7 +54,7 @@ async function classifyBatch(batch,key,signal,fetcher,output) {
   headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
   signal,
   body:JSON.stringify({
-   model,reasoning_effort:'medium',temperature:0,max_completion_tokens:3000,
+   model,reasoning_effort:'low',temperature:0,max_completion_tokens:2000,
    response_format:responseFormat,
    messages:[{role:'system',content:instructions},{role:'user',content:JSON.stringify(messages)}],
   }),

@@ -316,7 +316,9 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   } finally { imap.close(); }
   // Categories saved by the scheduled 9 AM / 3 PM AI sort are reused, so only new mail goes to the model.
   const stored = config.storedLabels instanceof Map ? config.storedLabels : new Map();
-  const labels = await groqCategories(mail.filter(row=>!stored.has(row.id)),config.email,config.groqKey,fetchGroq,{deadline:config.groqDeadline});
+  // Skip mail already decided by saved AI labels or admin keywords, so the model only sees what it can change.
+  const labels = await groqCategories(mail.filter(row=>!stored.has(row.id)&&!keywordCategory(row.subject,row.body,config.keywords||[])),
+   config.email,config.groqKey,fetchGroq,{deadline:config.groqDeadline});
   const aiLabels = new Map(labels);
   for (const [id,category] of stored) if (!labels.has(id)) labels.set(id,category);
   for (const row of mail) {
@@ -363,15 +365,15 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
  }
 
  // Full readable text for exports: every inline text/plain part in order, or every HTML part converted to text.
- async function fullText(imap,uid,structure) {
+ async function fullText(imap,uid,structure,maxBytes=exportTextBytes) {
   const parts=textParts(structure);
   const plain=parts.filter(part=>part.type==='text/plain');
   const chosen=plain.length?plain:parts.filter(part=>part.type==='text/html');
   const pieces=[];
   let bytes=0, truncated=chosen.length>40;
   for (const {part,type} of chosen.slice(0,40)) {
-   if (bytes>=exportTextBytes) {truncated=true;break;}
-   const result=await readPart(imap,uid,part,exportTextBytes-bytes);
+   if (bytes>=maxBytes) {truncated=true;break;}
+   const result=await readPart(imap,uid,part,maxBytes-bytes);
    if (!result) continue;
    bytes+=result.raw.length;
    truncated||=result.truncated;
@@ -635,6 +637,33 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     }
    }
    return {mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),next:remaining,failed,deferred:queue.length>batch.length};
+  },
+  // Text excerpts for several messages over one connection (Ask AI context).
+  async textExcerpts(ids,chars=4000) {
+   const byFolder=new Map();
+   for (const id of ids.slice(0,12)) {
+    const match=messageLocation(id);
+    if (!match) continue;
+    const [,path,generation,uid]=match;
+    byFolder.set(path,[...(byFolder.get(path)||[]),{id,generation,uid}]);
+   }
+   const texts=new Map();
+   if (!byFolder.size) return texts;
+   await readConnection(async imap=>{
+    for (const [path,items] of byFolder) {
+     const lock=await imap.getMailboxLock(path,{readOnly:true});
+     try {
+      for (const item of items) {
+       if (String(imap.mailbox.uidValidity)!==item.generation) continue;
+       const message=await imap.fetchOne(item.uid,{bodyStructure:true},{uid:true});
+       if (!message?.bodyStructure) continue;
+       const text=await fullText(imap,item.uid,message.bodyStructure,chars*4);
+       texts.set(item.id,text.body.slice(0,chars));
+      }
+     } finally {lock.release();}
+    }
+   });
+   return texts;
   },
   async olderMail(input) {
    const {path,generation,before}=input||{};

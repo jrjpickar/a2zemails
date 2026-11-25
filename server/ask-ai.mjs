@@ -1,9 +1,18 @@
 import {setTimeout as delay} from 'node:timers/promises';
 import {askAiPrompt} from './ask-ai-prompt.mjs';
+import {currentMessageText} from '../src/model.mjs';
+// Quoted history repeats what other excerpts already show; drop it to save tokens.
+const currentText=body=>{const current=currentMessageText(body).trim();return (current.length>80?current:body).slice(0,4000);};
 
 const providerTimeout = 15000;
 const askTokens = 16384;
 const emailChars = 30000;
+// Deep reasoning only for analysis questions; quick lookups use medium effort and answer faster for less.
+const analysis=/\b(why|compare|comparison|which (?:one|bid|job)|should (?:we|i)|risk|risks|plan|strategy|recommend|estimate|total|sum|how many|how much|difference|changed|missing|analy[sz]e|prioriti[sz]e|summari[sz]e (?:all|every|the thread)|timeline|explain)\b/i;
+export const reasoningFor = question => analysis.test(question)||question.length>220 ? 'high' : 'medium';
+// Mailbox-wide search is skipped when the question is about the open email only.
+const widerContext=/\b(other|others|previous|previously|earlier|last (?:time|week|month|year)|history|before|any|all|every|inbox|mailbox|find|search|look up|did (?:we|they|i|he|she)|have (?:we|they|i)|ever|thread|conversation|related|similar|past)\b/i;
+export const needsMailboxSearch = (question,hasSelected) => !hasSelected || widerContext.test(question);
 const todayInPacific = () => new Intl.DateTimeFormat('en-US',{timeZone:'America/Los_Angeles',weekday:'long',year:'numeric',month:'long',day:'numeric'}).format(new Date());
 const totalTimeout = 40000;
 const temperature = 0.3;
@@ -33,7 +42,7 @@ const providers = [
    systemInstruction:{parts:[{text:prompt}]},
    contents:messages.map(({role,content})=>({role:role==='assistant'?'model':'user',parts:[{text:content}]})),
    ...(webSearch?{tools:[{google_search:{}}]}:{}),
-   generationConfig:{temperature:temp,maxOutputTokens:tokens,...(reasoning?{thinkingConfig:{thinkingLevel:'high'}}:{}),
+   generationConfig:{temperature:temp,maxOutputTokens:tokens,...(reasoning?{thinkingConfig:{thinkingLevel:reasoning==='high'?'high':'low'}}:{}),
     ...(json?{responseMimeType:"application/json",...(schema?{responseJsonSchema:schema}:{})}:{})},
   }),
   answer(data) {
@@ -51,7 +60,7 @@ const providers = [
   url:'https://api.groq.com/openai/v1/chat/completions',
   headers:key=>({Authorization:'Bearer '+key}),
   payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false,schema,model:settingsModel,reasoning=false,tokens=maxTokens,webSearch=false})=>({
-   model:settingsModel||'openai/gpt-oss-120b',reasoning_effort:reasoning&&/gpt-oss/.test(settingsModel||'gpt-oss')?'high':'low',temperature:temp,max_completion_tokens:tokens,
+   model:settingsModel||'openai/gpt-oss-120b',reasoning_effort:reasoning&&/gpt-oss/.test(settingsModel||'gpt-oss')?(reasoning==='high'?'high':'medium'):'low',temperature:temp,max_completion_tokens:tokens,
    ...(json?{response_format:schema?{type:'json_schema',json_schema:{name:'bid_invites',strict:true,schema}}:{type:'json_object'}}:{}),
    ...(webSearch&&/gpt-oss/.test(settingsModel||'gpt-oss')?{tools:[{type:'browser_search'}],tool_choice:'auto'}:{}),
    messages:[{role:'system',content:prompt},...messages],
@@ -174,7 +183,7 @@ export async function askEmail(config,mailbox,input,fetcher=fetch,{resilient=fal
   const contextBudget=resilient?AbortSignal.any([budget,AbortSignal.timeout(9000)]):budget;
   const [selected,matches]=await Promise.all([
    input.id?waitForContext(mailbox.body(input.id,{includeHtml:false,includeImages:false,includeSubject:true}),contextBudget):{},
-   typeof mailbox.mailSearch==='function'?findRelevantMail(mailbox,[question,...history.filter(turn=>turn.role==='user').slice(-1).map(turn=>turn.content)].join(' '),input.id,contextBudget):undefined,
+   typeof mailbox.mailSearch==='function'&&needsMailboxSearch(question,Boolean(input.id))?findRelevantMail(mailbox,[question,...history.filter(turn=>turn.role==='user').slice(-1).map(turn=>turn.content)].join(' '),input.id,contextBudget):undefined,
   ]);
   if (!selected&&!matches?.excerpts.length) {
    return contextBudget.aborted ? unavailable :
@@ -189,7 +198,7 @@ export async function askEmail(config,mailbox,input,fetcher=fetch,{resilient=fal
    ...(matches?{mailboxMatches:matches}:{}),
   })}];
   const result=await runAiChain(config,messages,{budget,fetcher,attempts,chain:askProviders,
-   reasoning:true,tokens:askTokens,geminiModel:config.askModel,groqModel:config.askGroqModel,webSearch:config.webSearch!==false});
+   reasoning:reasoningFor(question),tokens:askTokens,geminiModel:config.askModel,groqModel:config.askGroqModel,webSearch:config.webSearch!==false});
   answeredBy=result.provider;
   fallbackReason=result.fallbackReason;
   if (result.provider) return {status:200,data:{answer:result.answer,provider:result.provider,model:result.model,
@@ -231,13 +240,17 @@ async function findRelevantMail(mailbox,question,selectedId,budget) {
   const score=row=>keywords.reduce((sum,word)=>sum+Number((row.subject+' '+row.from).toLowerCase().includes(word)),0);
   const rows=result.mail.filter(row=>row.id!==selectedId)
    .map(row=>({row,score:score(row)})).sort((a,b)=>b.score-a.score||String(b.row.date).localeCompare(String(a.row.date))).slice(0,8);
+  // One IMAP connection for all excerpts when the mailbox supports it, instead of one per message.
+  const texts=typeof mailbox.textExcerpts==='function'
+   ? await waitForContext(mailbox.textExcerpts(rows.map(({row})=>row.id),4000).catch(()=>new Map()),signal)
+   : null;
   const excerpts=await waitForContext(Promise.all(rows.map(async ({row})=>{
-   let body='';
-   try {
+   let body=texts?.get(row.id)||'';
+   if (!texts) try {
     const result=await mailbox.body(row.id,{includeHtml:false,includeImages:false});
     body=(result?.body||'').slice(0,4000);
    } catch { /* Still provide authenticated envelope metadata. */ }
-   return {subject:row.subject.slice(0,300),from:row.from.slice(0,320),date:row.date,folder:row.folder,excerpt:body};
+   return {subject:row.subject.slice(0,300),from:row.from.slice(0,320),date:row.date,folder:row.folder,excerpt:currentText(body)};
   })),signal);
   return {excerpts:excerpts||rows.map(({row})=>({subject:row.subject,from:row.from,date:row.date,folder:row.folder,excerpt:''})),
    coverage:'top_keyword_matches_across_all_folders'};

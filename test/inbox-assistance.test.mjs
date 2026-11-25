@@ -22,7 +22,7 @@ test('Ask AI uses the MCP Groq reasoning model with web search first and falls b
    if (url.includes('groq.com')) {
     assert.equal(options.headers.Authorization,'Bearer '+config.groq);
     assert.equal(body.model,'openai/gpt-oss-120b');
-    assert.equal(body.reasoning_effort,'high');
+    assert.equal(body.reasoning_effort,'medium','quick lookup uses medium reasoning');
     assert.deepEqual(body.tools,[{type:'browser_search'}]);
     const {today,...context}=JSON.parse(body.messages.at(-1).content);
     assert.match(today,/\d{4}/);
@@ -33,7 +33,7 @@ test('Ask AI uses the MCP Groq reasoning model with web search first and falls b
    }
    assert.equal(options.headers['x-goog-api-key'],config.gemini);
    assert.deepEqual(body.tools,[{google_search:{}}]);
-   assert.equal(body.generationConfig.thinkingConfig.thinkingLevel,'high');
+   assert.equal(body.generationConfig.thinkingConfig.thinkingLevel,'low');
    return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{thought:true,text:'Private'},{text:'Friday'}]}}]});
   });
   assert.deepEqual(result,{status:200,data:{answer:'Friday',provider:failure==='none'?'Groq':'Gemini',
@@ -63,7 +63,7 @@ test('Groq retries 503 once before Gemini and both receive the same prompt, sett
  })),groq.messages.slice(1));
  assert.equal(gemini.generationConfig.temperature,groq.temperature);
  assert.equal(gemini.generationConfig.maxOutputTokens,groq.max_completion_tokens);
- assert.equal(groq.reasoning_effort,'high');
+ assert.equal(groq.reasoning_effort,'medium');
 });
 
 test('Ask AI drops reasoning and web search settings once when a provider rejects them',async ()=>{
@@ -161,4 +161,18 @@ test('Temperature falls back to a unique exact contact name and reads updated va
  const result=await mailboxTemperatures(mail,config,fetcher);
  assert.equal(result.mail[0].temperature,'vip');
  assert.equal(result.mail[1].temperature,undefined);
+});
+
+test('Ask AI saves work: deep reasoning only for analysis and no mailbox search for open-email questions',async ()=>{
+ const {reasoningFor,needsMailboxSearch}=await import('../server/ask-ai.mjs');
+ assert.equal(reasoningFor('When is it due?'),'medium');
+ assert.equal(reasoningFor('Compare the two bids and tell me which one we should prioritize'),'high');
+ assert.equal(needsMailboxSearch('When is it due?',true),false);
+ assert.equal(needsMailboxSearch('Did we bid this GC before?',true),true);
+ assert.equal(needsMailboxSearch('When is it due?',false),true);
+ let searched=false;
+ const result=await askEmail({groq:'fake'},{...mailbox,mailSearch:async()=>{searched=true;return {mail:[]};}},question,
+  async()=>Response.json({choices:[{message:{content:'Friday'}}]}));
+ assert.equal(result.data.answer,'Friday');
+ assert.equal(searched,false);
 });

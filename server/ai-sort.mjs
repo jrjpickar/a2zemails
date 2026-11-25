@@ -1,6 +1,7 @@
 import {getStore} from '@netlify/blobs';
 import {createHash} from 'node:crypto';
 import {createIonosMailbox,ionosConfig} from './ionos.mjs';
+import {noteStore,postEmailNotes} from './ghl-notes.mjs';
 
 // Scheduled AI sorting. Runs at 9 AM and 3 PM Pacific for every active mailbox with a saved password,
 // stores the AI's categories in Netlify Blobs, and the inbox applies them on load without asking the AI again.
@@ -52,13 +53,15 @@ function envPasswords(env) {
  } catch { return new Map(); }
 }
 
-export async function runScheduledSort(env,{directory,admin,labels=aiLabelStore(),makeMailbox=createIonosMailbox,trigger='schedule'}={}) {
+export async function runScheduledSort(env,{directory,admin,labels=aiLabelStore(),notes=noteStore(),makeMailbox=createIonosMailbox,fetcher=fetch,trigger='schedule'}={}) {
  const started = new Date();
  const passwords = envPasswords(env);
  const mcp = env.MCP_IONOS_EMAIL?.trim().toLowerCase();
  if (mcp && env.MCP_IONOS_PASSWORD) passwords.set(mcp,env.MCP_IONOS_PASSWORD);
  const users = (await directory.list()).filter(user=>user.status==='active');
  const keywords = await admin.keywords(true);
+ const noteSettings = await notes.settings();
+ const noteResults = [];
  const results = [];
  for (const user of users) {
   const password = await directory.credential(user.email) || passwords.get(user.email);
@@ -73,6 +76,11 @@ export async function runScheduledSort(env,{directory,admin,labels=aiLabelStore(
    const dates = new Map(data.mail.map(row=>[row.id,row.date]));
    const stored = await labels.save(user.email,fresh,dates);
    results.push({email:user.email,status:'ok',sorted:fresh.size,stored,ms:Date.now()-began});
+   if (noteSettings.enabled) {
+    // data.mail already carries the final categories (keywords, rules and AI), so skipped categories are respected.
+    try { noteResults.push({email:user.email,...await postEmailNotes({env,email:user.email,mail:data.mail,settings:noteSettings,store:notes,fetcher})}); }
+    catch (error) { noteResults.push({email:user.email,status:'failed',detail:String(error?.message||'HighLevel notes failed').slice(0,160)}); }
+   }
   } catch (error) {
    const auth = error?.authenticationFailed||error?.code==='EAUTH'||error?.serverResponseCode==='AUTHENTICATIONFAILED';
    results.push({email:user.email,status:'failed',detail:auth?'IONOS rejected the saved password':String(error?.message||'Mailbox read failed').slice(0,160),ms:Date.now()-began});
@@ -80,6 +88,7 @@ export async function runScheduledSort(env,{directory,admin,labels=aiLabelStore(
  }
  const summary = {trigger,startedAt:started.toISOString(),finishedAt:new Date().toISOString(),results};
  await labels.saveRun(summary);
+ if (noteSettings.enabled) await notes.saveRun({finishedAt:summary.finishedAt,trigger,results:noteResults}).catch(()=>{});
  console.info('[AI sort]',JSON.stringify({trigger,results:results.map(({email,status,sorted})=>({email,status,sorted}))}));
  return summary;
 }

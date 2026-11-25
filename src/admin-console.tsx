@@ -9,11 +9,13 @@ type Counts=Record<string,number>;
 type Activity={days:number;events:{at:string;action:string;email:string}[];users:{email:string;lastSeen:string;counts:Counts}[];
  daily:({date:string}&Counts)[];team:{email:string;name:string;status:string;admin:boolean}[]};
 type Health={checkedAt:string;checks:{name:string;status:'ok'|'warn'|'fail';detail:string;ms:number}[]};
-type Tab='team'|'keywords'|'activity'|'health';
+type Tab='team'|'keywords'|'notes'|'activity'|'health';
+type NoteSettings={enabled:boolean;direction:'received'|'sent'|'both';skipCategories:string[];testContact:string;disabledReason?:string;updatedBy?:string;updatedAt?:string};
+type NoteRun={finishedAt:string;trigger:string;results:{email:string;status:string;posted?:number;matched?:number;lookups?:number;failed?:number;detail?:string}[]};
 
 const actionLabels:Record<string,string>={'sign-in':'Signed in','sign-in-failed':'Failed sign-in','ghl-sign-in':'HighLevel sign-in',
  open:'Opened inbox',send:'Sent email','ask-ai':'Asked AI',export:'Exported CSV','bid-scan':'Started bid scan',team:'Changed team access',
- keywords:'Changed sorting keywords',error:'Server error'};
+ keywords:'Changed sorting keywords',settings:'Changed HighLevel notes',error:'Server error'};
 const when=(value:string)=>new Date(value).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
 const errorText=(error:unknown,fallback:string)=>error instanceof Error?error.message:fallback;
 
@@ -53,6 +55,50 @@ function Keywords({request}:{request:Request}) {
     <button type="button" className="project-tag" disabled={busy} aria-label={'Remove '+item.term} onClick={()=>void change({op:'remove',id:item.id})}>Remove</button>
    </li>)}</ul>
   </section>)}
+ </div>;
+}
+
+function NotesView({request}:{request:Request}) {
+ const [data,setData]=useState<{settings:NoteSettings;lastRun:NoteRun|null;setup:{writeToken:boolean;readToken:boolean;ready:boolean}}|null>(null);
+ const [form,setForm]=useState<NoteSettings|null>(null);
+ const [busy,setBusy]=useState(false);
+ const [note,setNote]=useState('');
+ useEffect(()=>{request('admin-notes').then(result=>{setData(result);setForm(result.settings);}).catch(failure=>setNote(errorText(failure,'Could not load settings.')));},[]);
+ async function save(event:FormEvent<HTMLFormElement>) {
+  event.preventDefault();
+  if (!form) return;
+  setBusy(true);setNote('');
+  try {const {settings}=await request('admin-notes',form);setForm(settings);setNote('Saved. Notes post at the next 9 AM or 3 PM run, or use Run AI sorting now in Health checks.');}
+  catch(failure) {setNote(errorText(failure,'Settings did not save.'));}
+  finally {setBusy(false);}
+ }
+ if (!form||!data) return <div className="signature-fields"><p role="status">{note||'Loading…'}</p></div>;
+ const toggle=(category:string)=>setForm({...form,skipCategories:form.skipCategories.includes(category)?form.skipCategories.filter(item=>item!==category):[...form.skipCategories,category]});
+ return <div className="signature-fields">
+  <form className="team-onboard" onSubmit={save}>
+   <b>Post email summaries to HighLevel</b>
+   <p>At each 9 AM and 3 PM run, new emails with an existing HighLevel contact (exact email match) get a short AI summary as an internal comment in that contact's conversation. Prices and dates are kept. Attachments are left out. Contacts are never created.</p>
+   {!data.setup.ready&&<p role="alert">Not ready: {!data.setup.writeToken&&'set GHL_CONVERSATIONS_PIT_TOKEN. '}{!data.setup.readToken&&'set GHL_CONTACTS_PIT_TOKEN. '}Also check GHL_CONTACTS_LOCATION_ID.</p>}
+   <p className="note-safety">Only internal comments are created, never texts or emails. The first note of every run is read back from HighLevel; if it is not an internal comment, posting stops and this switch turns off.</p>
+   {form.disabledReason&&!form.enabled&&<p role="alert">Turned off by the safety check: {form.disabledReason}</p>}
+   <label className="remember-mailbox"><input type="checkbox" checked={form.enabled} onChange={event=>setForm({...form,enabled:event.target.checked})} disabled={busy}/> Post summaries to HighLevel</label>
+   <label>Emails to include<select value={form.direction} onChange={event=>setForm({...form,direction:event.target.value as NoteSettings['direction']})} disabled={busy}>
+    <option value="both">Received and sent</option><option value="received">Received only</option><option value="sent">Sent only</option></select></label>
+   <label>Test contact email (optional)<input type="email" value={form.testContact||''} placeholder="Post only to this contact while testing"
+    onChange={event=>setForm({...form,testContact:event.target.value})} disabled={busy}/></label>
+   <small>Start with a test contact that you own. Check in HighLevel that the note shows as an internal comment, then clear this field to post for everyone.</small>
+   <fieldset className="note-skip"><legend>Skip these categories</legend>
+    {categories.map(category=><label key={category}><input type="checkbox" checked={form.skipCategories.includes(category)} onChange={()=>toggle(category)} disabled={busy}/> {category}</label>)}
+   </fieldset>
+   <button className="send" disabled={busy}>{busy?'Saving…':'Save settings'}</button>
+   {form.updatedBy&&<small>Last changed by {form.updatedBy}{form.updatedAt?' on '+when(form.updatedAt):''}</small>}
+  </form>
+  {note&&<p role="status">{note}</p>}
+  <b>Last run</b>
+  {!data.lastRun?<p>No notes posted yet.</p>:<table className="admin-table"><thead><tr><th>Mailbox</th><th>Matched</th><th>Posted</th><th>Lookups</th><th>Status</th></tr></thead>
+   <tbody>{data.lastRun.results.map(item=><tr key={item.email}><td>{item.email}</td><td>{item.matched??0}</td><td>{item.posted??0}</td><td>{item.lookups??0}</td>
+    <td title={item.detail||''}>{item.status}{item.detail?': '+item.detail:''}</td></tr>)}</tbody></table>}
+  {data.lastRun&&<small>Finished {when(data.lastRun.finishedAt)}. Lookups are HighLevel contact searches; known contacts are cached for 7 days.</small>}
  </div>;
 }
 
@@ -137,7 +183,7 @@ function HealthView({request}:{request:Request}) {
 
 export function AdminConsole({request,self,onClose,onChanged}:{request:Request;self:string;onClose:()=>void;onChanged?:()=>void}) {
  const [tab,setTab]=useState<Tab>('team');
- const tabs:[Tab,string][]=[['team','Team'],['keywords','Sorting keywords'],['activity','Activity and stats'],['health','Health checks']];
+ const tabs:[Tab,string][]=[['team','Team'],['keywords','Sorting keywords'],['notes','HighLevel notes'],['activity','Activity and stats'],['health','Health checks']];
  return <div className="modal-back centered" onClick={onClose}>
   <section className="signature-settings admin-console" role="dialog" aria-modal="true" aria-label="Admin console" onClick={event=>event.stopPropagation()}
    onKeyDown={event=>{if(event.key==='Escape'){event.stopPropagation();onClose();}}}>
@@ -146,6 +192,7 @@ export function AdminConsole({request,self,onClose,onChanged}:{request:Request;s
     className={'project-tag'+(tab===value?' active':'')} onClick={()=>setTab(value)}>{label}</button>)}</div>
    {tab==='team'&&<TeamAccess embedded request={request} self={self} onClose={onClose} onChanged={onChanged}/>}
    {tab==='keywords'&&<Keywords request={request}/>}
+   {tab==='notes'&&<NotesView request={request}/>}
    {tab==='activity'&&<ActivityView request={request}/>}
    {tab==='health'&&<HealthView request={request}/>}
   </section>
