@@ -133,7 +133,7 @@ test('Inbox recovery fetches only the latest envelopes from INBOX', async () => 
   }
   async fetchAll(range,fields) {
    assert.equal(range,'141:200');
-   assert.deepEqual(fields,{uid:true,envelope:true,internalDate:true,flags:true});
+   assert.deepEqual(fields,{uid:true,envelope:true,internalDate:true,flags:true,headers:['REFERENCES']});
    return [
     {uid:12,flags:new Set(['\\Deleted'])},
     {uid:13,flags:new Set(['\\Seen']),envelope:{subject:'A real message'}},
@@ -223,6 +223,11 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
     return {email:config.email,mail,contacts:[]};
    },
    async inboxSummary() {return {email:config.email,mail:[],inboxOnly:true};},
+   async exportFolders() { return [{path:'INBOX',folder:'Inbox'},{path:'Stored Jobs',folder:'Archive'}]; },
+   async folderSummary(path,folder) {
+    assert.equal(path,folder==='Inbox'?'INBOX':'Stored Jobs');
+    return {email:config.email,mail:[{id:path+':1:1',folder,subject:'Fixture',category:'General'}]};
+   },
   }),
  });
  const call=(action,{body,token,origin,cookie}={})=>handler(new Request('https://test.example/.netlify/functions/ionos?action='+action,{
@@ -254,6 +259,14 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
  const summary=await recovered.json();
  assert.equal(summary.inboxOnly,true);
  assert.equal(summary.email,env.IONOS_EMAIL);
+ const folders=await call('mail-folders',{token});
+ assert.deepEqual((await folders.json()).folders.map(entry=>entry.folder),['Inbox','Archive']);
+ const archive=await call('mail-folder',{token,body:{folder:'Archive'}});
+ assert.equal(archive.status,200);
+ assert.equal((await archive.json()).mail[0].id,'Stored Jobs:1:1');
+ const labels=await call('mail-labels',{token,body:{folder:'Inbox'}});
+ assert.equal(labels.status,200);
+ assert.deepEqual((await labels.json()).labels,[{id:'INBOX:1:1'}]);
  fullRefreshError=Object.assign(new Error('Bad credentials'),{authenticationFailed:true});
  assert.equal((await call('mail',{token})).status,401);
  fullRefreshError=undefined;
@@ -386,7 +399,8 @@ test('opening a large IONOS email fetches only its readable MIME body', async ()
  const {mail}=await mailbox.mail();
  assert.equal(mail[0].body,'');
  assert.equal(mail[0].needsBody,true);
- const detail=await mailbox.body(mail[0].id);
+ const detail=await mailbox.body(mail[0].id,{includeAttachments:true});
+ assert.ok(detail.attachments.some(file=>file.name.endsWith('.pdf')));
  assert.match(detail.body,/Use the revised plans\./);
  assert.doesNotMatch(detail.body,/<img|<strong>/);
  assert.equal(detail.truncated,false);

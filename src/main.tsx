@@ -186,70 +186,119 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const searchRevision=React.useRef(0);
  const searchAbort=React.useRef<AbortController|null>(null);
  const refreshing = React.useRef<Promise<void>|null>(null);
+ const folderRequests=React.useRef(new Map<string,{revision:number;promise:Promise<void>}>());
+ const loadedFolders=React.useRef(new Set<string>());
+ const labelRequests=React.useRef(new Map<string,symbol>());
  const mailboxRevision = React.useRef(0);
  const moving = React.useRef(new Set<string>());
- function refreshMailbox() {
-  if (refreshing.current) return refreshing.current;
+ const activeFolder=nav.startsWith('folder:')?nav.slice(7):['Sent','Archive','Trash','Spam'].includes(nav)?nav:'Inbox';
+ const activeFolderRef=React.useRef(activeFolder);
+ activeFolderRef.current=activeFolder;
+ function refreshMailbox(folder=activeFolderRef.current) {
   const revision=mailboxRevision.current;
-  const pending=fetchMailbox(revision).finally(()=>{refreshing.current=null});
+  const existing=folderRequests.current.get(folder);
+  if (existing?.revision===revision) return existing.promise;
+  const pending=fetchMailbox(folder,revision).finally(()=>{
+   if (folderRequests.current.get(folder)?.promise===pending) folderRequests.current.delete(folder);
+   if (refreshing.current===pending) refreshing.current=null;
+  });
+  folderRequests.current.set(folder,{revision,promise:pending});
   refreshing.current=pending;
   return pending;
  }
- async function fetchMailbox(revision:number) {
-  setConnection('Connecting to IONOS…');
-  setMailboxIssue('');
+ async function refreshFolderList() {
   try {
-   type MailboxResponse={email:string;mail:Message[];contacts?:Contact[];folders?:string[];askAi?:boolean;temperatureFolders?:boolean;temperatureUnavailable?:boolean;profile?:Profile;unavailableFolders?:string[];inboxOnly?:boolean};
-   let data:MailboxResponse;
-   let fullRefreshReference='';
-   try {
-    data=await liveRequest('mail',undefined,hosted?AbortSignal.timeout(20000):undefined);
-    if (!Array.isArray(data.mail) || typeof data.email!=='string') throw new Error('The mailbox service returned an incomplete response.');
-   } catch (error) {
-    const failure=error as {status?:number;requestId?:string};
-    if (!hosted || revision!==mailboxRevision.current || (failure.status && failure.status<500)) throw error;
-    fullRefreshReference=failure.requestId||'';
-    setConnection('Loading recent Inbox messages…');
-    data=await liveRequest('mail-inbox',undefined,AbortSignal.timeout(24000));
-   }
+   const {folders}=await liveRequest('mail-folders',undefined,AbortSignal.timeout(20000));
+   setMailFolders([...new Set<string>(folders.map((entry:{folder:string})=>entry.folder))]
+    .filter(folder=>!groups[1].links.some(([name])=>name===folder))
+    .sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'})));
+  } catch { /* The Inbox and standard folder controls remain usable. */ }
+ }
+ async function loadMailboxLabels(folder:string,revision:number) {
+  if (!['Inbox','Sent'].includes(folder)) return;
+  const request=Symbol();
+  labelRequests.current.set(folder,request);
+  try {
+   const result:{archived?:string[];labels:(Pick<Message,'id'|'temperature'|'delivery'>&{category?:string})[];temperatureUnavailable?:boolean}=
+    await liveRequest('mail-labels',{folder},AbortSignal.timeout(20000));
+   if (revision!==mailboxRevision.current||labelRequests.current.get(folder)!==request) return;
+   const archived=new Set(result.archived);
+   const labels=new Map(result.labels.map(label=>[label.id,label]));
+   setState(previous=>({...previous,mail:previous.mail.filter(row=>!archived.has(row.id)).map(row=>{
+    const label=labels.get(row.id);
+    return label?{...row,...label,category:label.category||row.category}:row;
+   })}));
+   if (folder==='Inbox') setMailFeatures(previous=>({...previous,temperatureUnavailable:!!result.temperatureUnavailable}));
+  } catch {
+   if (folder==='Inbox'&&revision===mailboxRevision.current&&labelRequests.current.get(folder)===request) setMailFeatures(previous=>({...previous,temperatureUnavailable:true}));
+  }
+ }
+ async function fetchMailbox(folder:string,revision:number) {
+  if (folder===activeFolderRef.current) {
+   setConnection('Loading '+folder+'…');
+   setMailboxIssue('');
+  }
+  try {
+   const data:{email:string;mail:Message[];contacts?:Contact[];folders?:string[];askAi?:boolean;temperatureFolders?:boolean;temperatureUnavailable?:boolean;profile?:Profile;unavailableFolders?:string[]}
+    =await liveRequest(hosted?(folder==='Inbox'?'mail-inbox':'mail-folder'):'mail',hosted&&folder!=='Inbox'?{folder}:undefined,hosted?AbortSignal.timeout(26000):undefined);
    if (revision!==mailboxRevision.current) return;
-   if (!Array.isArray(data.mail) || typeof data.email!=='string') throw new Error('The mailbox service returned an incomplete response.');
-   if (!data.inboxOnly) {
+   if (!Array.isArray(data.mail)||typeof data.email!=='string') throw new Error('The mailbox service returned an incomplete response.');
+   const recentContacts=data.contacts||[];
+   if (hosted&&recentContacts.length) setKnownContacts(previous=>{
+    const contacts=new Map([...previous,...recentContacts].map(contact=>[contact.address,contact]));
+    return [...contacts.values()].slice(-1000);
+   });
+   if (!hosted) {
     setKnownContacts(data.contacts||[]);
-    setMailFeatures({askAi:!!data.askAi,temperatureFolders:!!data.temperatureFolders,temperatureUnavailable:!!data.temperatureUnavailable});
-   } else {
-    setMailFeatures(previous=>({...previous,askAi:!!data.askAi}));
+    setMailFolders((data.folders||[]).filter(folder=>!groups[1].links.some(([name])=>name===folder)).sort());
    }
+   if (!hosted||folder==='Inbox') setMailFeatures({askAi:!!data.askAi,temperatureFolders:!!data.temperatureFolders,temperatureUnavailable:!!data.temperatureUnavailable});
    setAccount(data.email);
    if (data.profile) setProfile({name:data.profile.name,admin:!!data.profile.admin});
-   if (!data.inboxOnly) setMailFolders((data.folders||[]).filter(folder=>!groups[1].links.some(([name])=>name===folder))
-    .sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'})));
    const fetched=new Set(data.mail.map(message=>message.id));
    const unavailable=new Set(data.unavailableFolders);
-   setState(previous=>({...previous,mail:[
-    ...data.mail,
-    // Keep older pages the user loaded. Refresh only replaces the recent window.
-    ...previous.mail.filter(message=>(message.older||unavailable.has(message.folder)||(data.inboxOnly&&message.folder!=='Inbox'))&&!fetched.has(message.id)&&!message.id.startsWith('out-')),
-    ...previous.mail.filter(message=>message.folder==='Sent' && message.id.startsWith('out-') &&
-      !data.mail.some(fetched=>fetched.headers.messageId===message.headers.messageId))
-   ]}));
-   setSelected(current=>{
-    if (current.startsWith('out-')) return data.mail.find(message=>message.headers.messageId.startsWith('<'+current+'@'))?.id||current;
-    return data.mail.some(message=>message.id===current)?current:data.mail[0]?.id||'';
+   const sentIds=new Set(data.mail.filter(row=>row.folder==='Sent').map(row=>row.headers.messageId));
+   setState(previous=>{
+    const cachedRows=new Map(previous.mail.map(row=>[row.id,row]));
+    const recent=data.mail.map(message=>{
+     const cached=cachedRows.get(message.id);
+     return cached?.attachments&&!message.attachments?{...message,attachments:cached.attachments,files:cached.files}:message;
+    });
+    const retained=previous.mail.filter(message=>{
+     if (fetched.has(message.id)) return false;
+     if (message.id.startsWith('out-')) return !sentIds.has(message.headers.messageId);
+     return message.older||unavailable.has(message.folder)||(hosted&&message.folder!==folder);
+    });
+    return {...previous,mail:[...recent,...retained]};
    });
-   setConnection(data.inboxOnly?'Recent Inbox only':'IONOS connected');
-   if (data.inboxOnly) setMailboxIssue('Recent Inbox messages loaded. Retry to refresh all folders.'+
-    (fullRefreshReference?' (Reference: '+fullRefreshReference+')':''));
-   else if (unavailable.size) setMailboxIssue('Some folders could not load: '+[...unavailable].join(', ')+'.');
+   loadedFolders.current.add(folder);
+   if (folder===activeFolderRef.current) {
+    setSelected(current=>{
+     if (current.startsWith('out-')) return data.mail.find(message=>message.headers.messageId.startsWith('<'+current+'@'))?.id||current;
+     return current==='mail-0'?data.mail[0]?.id||'':current;
+    });
+    setConnection('IONOS connected');
+    if (unavailable.size) setMailboxIssue('Some folders could not load: '+[...unavailable].join(', ')+'.');
+   }
+   if (hosted) void loadMailboxLabels(folder,revision);
   } catch (error) {
-   if (revision!==mailboxRevision.current) return;
+   if (revision!==mailboxRevision.current||folder!==activeFolderRef.current) return;
    setConnection('Mailbox refresh failed');
    const requestId=(error as {requestId?:string})?.requestId;
    const message=error instanceof Error ? error.message : 'Unable to connect to IONOS.';
    setMailboxIssue(message+(requestId?' (Request ID: '+requestId+')':''));
   }
  }
- useEffect(()=>{if(liveToken)void refreshMailbox()},[]);
+ useEffect(()=>{
+  if (!liveToken) return;
+  void refreshMailbox('Inbox').then(()=>{if (hosted) void refreshFolderList();});
+ },[]);
+ useEffect(()=>{
+  if (!liveToken||!hosted) return;
+  if (!loadedFolders.current.has(activeFolder)) void refreshMailbox(activeFolder);
+  else {setConnection('IONOS connected');setMailboxIssue('');}
+  if (nav==='Command Center'&&!loadedFolders.current.has('Sent')) void refreshMailbox('Sent');
+ },[activeFolder,nav,hosted,liveToken]);
  async function syncPreferences() {
   if (!hosted||!account) return;
   const version=++prefsVersion.current;
@@ -640,6 +689,9 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   });
   const pending=liveRequest('body',{id:message.id}).then((result:MailBody)=>{
    setBodies(previous=>({...previous,[message.id]:result}));
+   const attachments=result.attachments;
+   if (attachments) setState(previous=>({...previous,mail:previous.mail.map(row=>row.id===message.id?
+    {...row,attachments,files:attachments.map(file=>file.name)}:row)}));
    return result;
   }).catch(error=>{
    setBodies(previous=>({...previous,[message.id]:{error:error instanceof Error?error.message:'Could not load the message.'}}));
@@ -729,7 +781,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     setToast('Open this message in IONOS Webmail to forward the complete text.');
     return;
    }
-   m={...m,body:result.body};
+   m={...m,body:result.body,attachments:result.attachments||m.attachments};
   }
   const d:Draft={id:crypto.randomUUID(),to:m&&mode!=='Forward'?m.from:'',cc:mode==='Reply all'&&m?[m.to,m.cc].join(', ').split(',').map(s=>s.trim()).filter(s=>s&&!senderIdentities.includes(s)&&s!==m.from).join(', '):'',subject:m?(mode==='Forward'?'Fwd: ':'Re: ')+m.subject.replace(/^(Re: |Fwd: )+/i,''):'',body:prefill!==undefined?prefill:mode==='Forward'&&m?'\n\n---------- Forwarded message ----------\nFrom: '+m.from+'\nSubject: '+m.subject+'\n\n'+m.body:'',files:!liveToken&&mode==='Forward'&&m?[...m.files]:[],forwardedAttachments:liveToken&&mode==='Forward'&&m?m.attachments?.map(file=>({messageId:m.id,part:file.part,name:file.name})):undefined,thread:mode==='Forward'?undefined:m?.thread,parent:mode==='Forward'||!m?undefined:{headers:m.headers,project:m.project},identity:account||demo,includeSignature:true};
   setDraftSaveState('');
@@ -967,11 +1019,13 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   setSendReceipt({subject:draft.subject,to:recipients,accepted:liveToken?accepted:recipients,rejected,sentSaved:liveToken?sentSaved:true,live:Boolean(liveToken),id,thread:Boolean(draft.thread)});
   if(!draft.thread){go('Sent');setSelected(id);setMobileRead(true)}
   // Swap the local copy for the IONOS Sent copy so its attachments can be opened.
-  if (liveToken&&sentSaved) window.setTimeout(()=>{void (refreshing.current||Promise.resolve()).then(()=>refreshMailbox());},2500);
+  if (liveToken&&sentSaved) window.setTimeout(()=>{void (refreshing.current||Promise.resolve()).then(()=>refreshMailbox('Sent'));},2500);
  }
  function refreshCurrentView() {
-  if (liveToken) void refreshMailbox();
-  else {setState(getState());setToast('Sandbox inbox refreshed');}
+  if (liveToken) {
+   void refreshMailbox();
+   if (hosted) void refreshFolderList();
+  } else {setState(getState());setToast('Sandbox inbox refreshed');}
  }
  function receive(){const id=crypto.randomUUID(),s=samples[2];const subject='NTP — Riverside Warehouse field mobilization';const m:Message={...s,id,thread:id,subject,date:new Date().toISOString(),body:'Notice to proceed is approved. Please confirm the mobilization window with field operations.',category:classify(subject,'',s.from,state.rules),project:matchProject(subject),unread:true,star:false,files:[],headers:{messageId:'<'+id+'@a2z.example>',references:[]}};setState(s=>({...s,mail:[m,...s.mail]}));go('Inbox');setToast('Sample email received')}
  useEffect(()=>{function key(e:KeyboardEvent){if(e.key==='Escape'){if(livePreview)setLivePreview(null);else if(preview)setPreview(null);else if(deleteTarget){if(!saving)setDeleteTarget(null);}else if(signatureForm&&!saving)setSignatureForm(null);else if(compose&&!sending&&!saving)closeDraft();else if(help)setHelp(false);else {setMenu('');setMobileRead(false)}return}const editable=(e.target instanceof HTMLElement ? e.target : document.body).closest('input,textarea,select,[contenteditable="true"]');
@@ -1002,14 +1056,18 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  // A message you just sent is a local copy until IONOS returns the Sent copy, which carries the real attachment parts.
  async function openSentAttachment(message:Message,name:string) {
   const find=()=>mailRef.current.find(item=>!item.id.startsWith('out-')&&item.folder==='Sent'&&
-   item.headers.messageId===message.headers.messageId&&item.attachments?.some(file=>file.name===name));
+   item.headers.messageId===message.headers.messageId);
   let copy=find();
   if (!copy) {
    setToast('Loading the Sent copy from IONOS…');
    await refreshing.current;
-   await refreshMailbox();
+   await refreshMailbox('Sent');
    await new Promise(resolve=>setTimeout(resolve,50));
    copy=find();
+  }
+  if (copy&&!copy.attachments) {
+   try {copy={...copy,attachments:(await loadBody(copy)).attachments};}
+   catch { /* The message may not be readable yet. */ }
   }
   const file=copy?.attachments?.find(item=>item.name===name);
   if (!copy||!file) {setToast('IONOS has not saved the Sent copy yet. Try again in a minute.');return;}
@@ -1017,11 +1075,15 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   setLivePreview({kind:'mail',id:copy.id,part:file.part,name:file.name,hosted});
  }
  function renderAttachments(messages:Message[]) {
-  const cards=messages.flatMap(message=>liveToken
+  const cards=messages.flatMap(row=>{
+   const result=bodies[row.id];
+   const message=result&&'body' in result&&result.attachments?{...row,attachments:result.attachments}:row;
+   return liveToken
    ? (message.attachments?.length
     ? message.attachments.map(file=>({key:message.id+':'+file.part,name:file.name,message,open:()=>setLivePreview({kind:'mail',id:message.id,part:file.part,name:file.name,hosted})}))
     : message.files.map((name,index)=>({key:message.id+':file:'+index,name,message,open:()=>void openSentAttachment(message,name)})))
-   : message.files.map((name,index)=>({key:message.id+':'+index,name,message,open:()=>setPreview(name)})));
+   : message.files.map((name,index)=>({key:message.id+':'+index,name,message,open:()=>setPreview(name)}));
+  });
   if (!cards.length) return null;
   return <section className="attachments thread-attachments"><h3><Paperclip size={15}/> Attachments <span>{cards.length}</span></h3>
    <div>{cards.map(({key,name,message,open})=><button type="button" key={key} onClick={open}>
@@ -1091,7 +1153,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   <input id="search" placeholder="Search mail, projects, attachments…" value={query} onChange={e=>{setQuery(e.target.value);setMobileRead(false);setLimit(60)}}/>{query?<button className="icon" title="Clear search" onClick={()=>setQuery('')}><X size={14}/></button>:<kbd>/</kbd>}</div><button className="theme-toggle" aria-label={theme==='dark'?'Switch to color mode':'Switch to dark mode'} onClick={()=>setTheme(theme==='dark'?'color':'dark')}>{theme==='dark'?<Moon size={15}/>:<Palette size={15}/>}<span>{theme==='dark'?'Dark mode':'Color mode'}</span></button><button className="demo-pill" onClick={()=>setMenu(menu==='sandbox'?'':'sandbox')}><i/> {liveToken?'IONOS':'Sandbox'} <ChevronDown size={12}/></button>
  {menu==='search-filters'&&<SearchFilters value={searchFilters} onChange={value=>{setSearchFilters(value);setLimit(60);}}
   folders={physicalFolders} current={currentSearchFolder} onClose={()=>{setMenu('');document.getElementById('search')?.focus();}}/>}
- {menu==='sandbox'&&<div className="popover sandbox-menu"><b>{liveToken?'IONOS Mail':'Sandbox mode'}</b><p>{liveToken?(account||connection):'Changes stay in this browser.'}</p><a className="project-tag" href={liveToken?'?sandbox=1':location.pathname}>{liveToken?'Open sandbox':'Return to live inbox'}</a>{liveToken?<button onClick={()=>void refreshMailbox()}>Refresh mailbox <kbd>⌘⇧R</kbd></button>:<button onClick={receive}><Inbox size={15}/> Simulate incoming mail</button>}<button disabled={!senderIdentities.length} onClick={openSignatures}><Settings2 size={15}/> Email signatures</button><button onClick={()=>{setHelp(true);setMenu('')}}>Keyboard shortcuts</button>{onSignOut&&<button onClick={()=>void onSignOut().catch(error=>setToast(error.message))}>Sign out</button>}</div>}</header>
+ {menu==='sandbox'&&<div className="popover sandbox-menu"><b>{liveToken?'IONOS Mail':'Sandbox mode'}</b><p>{liveToken?(account||connection):'Changes stay in this browser.'}</p><a className="project-tag" href={liveToken?'?sandbox=1':location.pathname}>{liveToken?'Open sandbox':'Return to live inbox'}</a>{liveToken?<button onClick={refreshCurrentView}>Refresh mailbox <kbd>⌘⇧R</kbd></button>:<button onClick={receive}><Inbox size={15}/> Simulate incoming mail</button>}<button disabled={!senderIdentities.length} onClick={openSignatures}><Settings2 size={15}/> Email signatures</button><button onClick={()=>{setHelp(true);setMenu('')}}>Keyboard shortcuts</button>{onSignOut&&<button onClick={()=>void onSignOut().catch(error=>setToast(error.message))}>Sign out</button>}</div>}</header>
  {nav==='Command Center'&&!query?<div className="dashboard">
  <h1>Command Center</h1>
  <div className="mail-export-toolbar">

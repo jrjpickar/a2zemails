@@ -53,6 +53,15 @@ function addressList(items) {
  return (items||[]).map(address=>address?.address).filter(Boolean).join(', ');
 }
 
+function addEnvelopeContacts(contacts,envelope,email) {
+ for (const contact of [...(envelope?.from||[]),...(envelope?.to||[]),...(envelope?.cc||[])]) {
+  const address=contact?.address?.toLowerCase();
+  if (!address||!mailboxAddress.test(address)||address===email) continue;
+  if (!contacts.has(address)&&contacts.size>=1000) continue;
+  if (!contacts.get(address)?.name) contacts.set(address,{address,name:contact.name||''});
+ }
+}
+
 function isoDate(value) {
  return value instanceof Date && Number.isFinite(value.getTime()) ? value.toISOString() : null;
 }
@@ -321,14 +330,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
       const parsed = raw ? await parser(raw,{skipHtmlToText:false,skipImageLinks:true}).catch(()=>null) : null;
       const {envelope}=item;
       const from = addressList(envelope?.from);
-      if (!['Spam','Trash'].includes(folder)) {
-       for (const contact of [...(envelope?.from||[]),...(envelope?.to||[]),...(envelope?.cc||[])]) {
-        const address = contact?.address?.toLowerCase();
-        if (!address || !mailboxAddress.test(address) || address===config.email.toLowerCase()) continue;
-        if (!contacts.has(address) && contacts.size>=1000) continue;
-        if (!contacts.get(address)?.name) contacts.set(address,{address,name:contact.name||''});
-       }
-      }
+      if (!['Spam','Trash'].includes(folder)) addEnvelopeContacts(contacts,envelope,config.email.toLowerCase());
       const id = entry.path+':'+uidValidity+':'+item.uid;
       if (folder==='Inbox' && raw) {
        const report = deliveryReport(raw,{from,subject:envelope?.subject||''});
@@ -441,33 +443,54 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    return fetching;
   },
   inboxSummary() {
-   // Recovery path for a mailbox that authenticates but cannot complete the full refresh.
-   return readFolder('INBOX',async imap=>{
+   return mailbox.folderSummary('INBOX','Inbox');
+  },
+  folderSummary(path,folder,{scanReports=false}={}) {
+   return readFolder(path,async imap=>{
     const {exists,uidValidity}=imap.mailbox;
     const mail=[];
+    const contacts=new Map();
     if (exists) {
      const rows=await imap.fetchAll(Math.max(1,exists-59)+':'+exists,{
-      uid:true,envelope:true,internalDate:true,flags:true,
+      uid:true,envelope:true,internalDate:true,flags:true,headers:['REFERENCES'],
      });
      for (const item of rows) {
       if (item.flags?.has('\\Deleted')) continue;
       const {envelope}=item;
-      const id='INBOX:'+uidValidity+':'+item.uid;
+      const id=path+':'+uidValidity+':'+item.uid;
       const subject=envelope?.subject||'(No subject)';
       const from=addressList(envelope?.from);
       const headerId=envelope?.messageId||'';
-      const references=mimeReferences(null,envelope);
+      const references=mimeReferences({references:item.headers?.toString('utf8')},envelope);
+      if (!['Spam','Trash'].includes(folder)) addEnvelopeContacts(contacts,envelope,config.email.toLowerCase());
       mail.push({
        id,thread:references[0]||headerId||id,name:envelope?.from?.[0]?.name||from||'Unknown sender',
        subject,from,to:addressList(envelope?.to),cc:addressList(envelope?.cc),
        company:'',body:'',needsBody:true,date:isoDate(item.internalDate)||new Date(0).toISOString(),
-       folder:'Inbox',category:classify(subject,'',from),project:'',files:[],
+       folder,bcc:folder==='Sent'?addressList(envelope?.bcc):'',category:classify(subject,'',from),project:'',files:[],
        unread:!item.flags?.has('\\Seen'),star:Boolean(item.flags?.has('\\Flagged')),
        headers:{messageId:headerId,references},
       });
      }
     }
-    return {email:config.email,mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),inboxOnly:true};
+    const reports=[];
+    if (scanReports) {
+     const candidates=mail.filter(row=>/mailer-daemon|postmaster/i.test(row.from)||
+      /delivery (?:status|failure|notification)|undeliver|returned mail/i.test(row.subject)).slice(-16);
+     if (candidates.length) {
+      const byUid=new Map(candidates.map(row=>[Number(row.id.split(':').at(-1)),row]));
+      const sources=await imap.fetchAll([...byUid.keys()],{uid:true,source:{maxLength:65536}},{uid:true}).catch(()=>[]);
+      for (const {uid,source} of sources) {
+       const row=byUid.get(uid);
+       if (!row||!source) continue;
+       const report=deliveryReport(source,row);
+       if (report) reports.push({...report,messageId:row.id,date:row.date,
+        successOnly:report.recipients.every(recipient=>['delivered','relayed','expanded'].includes(recipient.action))});
+      }
+     }
+    }
+    return {email:config.email,contacts:[...contacts.values()],mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),...(folder==='Inbox'?{inboxOnly:true}:{}),
+     ...(scanReports?{reports}:{})};
    },{connectionTimeout:8000,greetingTimeout:8000,socketTimeout:8000});
   },
   folders() {
@@ -868,7 +891,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     return {name:'message-'+uid+'.eml',type:'message/rfc822',content:result.raw};
    });
   },
-  async body(id,{includeHtml=true,includeImages=true,includeSubject=false}={}) {
+  async body(id,{includeHtml=true,includeImages=true,includeSubject=false,includeAttachments=false}={}) {
    const match = messageLocation(id);
    if (!match) throw new TypeError('Invalid message.');
    const [,path,generation,uid] = match;
@@ -920,7 +943,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
        } catch { /* A missing inline image should not hide the message. */ }
       }
      }
-     return {body,truncated,...(includeSubject?{subject:message.envelope?.subject||''}:{}),...(html&&includeHtml?{html,...(includeImages?{images}:{})}:{})};
+     return {body,truncated,...(includeAttachments?{attachments:attachedFiles(message.bodyStructure)}:{}),...(includeSubject?{subject:message.envelope?.subject||''}:{}),...(html&&includeHtml?{html,...(includeImages?{images}:{})}:{})};
     } finally {lock.release();}
    } finally {imap.close();}
   },

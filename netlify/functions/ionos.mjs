@@ -1,3 +1,4 @@
+import {keywordCategory} from '../../src/model.mjs';
 import {sealBidScan} from '../../server/bid-scan-session.mjs';
 import {bidImportSettings,bidPreview,bookQualifiedBid,currentQualifiedBids,inspectBidEmail,oneEmailBids,qualifiedBids,qualifiedBidCsv} from '../../server/bid-import.mjs';
 import {dayInCalifornia,readBidReport,readBidScanActivity} from '../../server/bid-leads.mjs';
@@ -259,7 +260,51 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='mail-inbox' && request.method==='GET') {
     mailStage='inbox-summary';
     const data=await mailboxFactory(configFor(login)).inboxSummary();
-    return reply({...data,askAi:aiEnabled(ai),profile});
+    const temperatureFolders=Boolean(temperature&&(!session.highLevel||session.highLevel.activeLocation===temperature.locationId));
+    return reply({...data,askAi:aiEnabled(ai),temperatureFolders,profile});
+   }
+   if (action==='mail-folders' && request.method==='GET') {
+    mailStage='folder-list';
+    return reply({folders:await mailboxFactory(configFor(login)).exportFolders()});
+   }
+   if (['mail-folder','mail-labels'].includes(action) && request.method==='POST') {
+    mailStage=action;
+    const {folder}=await readInput(request,4096)||{};
+    if (typeof folder!=='string'||!folder||folder.length>1024) return reply({error:'Select a mailbox folder.'},400);
+    const mailbox=mailboxFactory(configFor(login));
+    const entries=folder==='Inbox'?[{path:'INBOX',folder}]:await mailbox.exportFolders();
+    const matching=entries.filter(entry=>entry.folder===folder);
+    const entry=matching[0];
+    if (action==='mail-folder') {
+     const pages=await Promise.all(matching.map(match=>mailbox.folderSummary(match.path,match.folder)));
+     const mail=pages.flatMap(page=>page.mail).sort((a,b)=>b.date.localeCompare(a.date));
+     return reply({email:login.email,mail,contacts:pages.flatMap(page=>page.contacts||[]),askAi:aiEnabled(ai),profile});
+    }
+    if (!entry||!['Inbox','Sent'].includes(folder)) return reply({labels:[]});
+    const canReadTemperature=temperature&&(!session.highLevel||session.highLevel.activeLocation===temperature.locationId);
+    const [{mail,reports=[]},stored,statuses,keywords]=await Promise.all([
+     mailbox.folderSummary(entry.path,entry.folder,{scanReports:folder==='Inbox'}),
+     folder==='Inbox'?aiLabels.load(login.email):new Map(),
+     folder==='Sent'?deliveries.load(login.email):{},
+     folder==='Inbox'?admin.keywords():[],
+    ]);
+    const archived=[];
+    if (reports.length) {
+     try {
+      await deliveries.merge(login.email,reports);
+      const ids=reports.filter(report=>report.successOnly).map(report=>report.messageId);
+      if (ids.length && await mailbox.archiveReports(ids)===ids.length) archived.push(...ids);
+     } catch { /* Mail was already returned by the folder request. */ }
+    }
+    const data=await mailboxTemperatures({mail},folder==='Inbox'&&canReadTemperature?temperature:null);
+    const labels=data.mail.map(row=>{
+     const category=stored.get(row.id);
+     const sendId=folder==='Sent'?sendIdFor(row):'';
+     return {id:row.id,temperature:row.temperature,delivery:sendId?deliveryStatus(row,statuses[sendId]):undefined,
+      category:keywordCategory(row.subject,'',keywords)||(row.category==='Bid Invitations'&&category==='General'?undefined:category)};
+    });
+    if (folder==='Inbox') await admin.record(login.email,'open',{throttle:true});
+    return reply({labels,archived,temperatureUnavailable:data.temperatureUnavailable});
    }
    if (action==='team' && request.method==='GET') {
     if (!access.admin) return reply({error:'Only a senior admin can manage team access.'},403);
@@ -529,7 +574,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    }
    if (action==='body' && request.method==='POST') {
     const input = await readInput(request,8192);
-    const result = await mailbox.body(input?.id);
+    const result = await mailbox.body(input?.id,{includeAttachments:true});
     return result ? reply(result) : reply({error:'The message is no longer in this folder. Refresh the mailbox and try again.'},404);
    }
    if (action==='attachment' && request.method==='POST') {
@@ -579,12 +624,12 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='update' && request.method==='POST') return reply(await mailbox.update(await readInput(request,4096)));
    return reply({error:'Unknown mailbox action.'},404);
   } catch(error) {
-   if (['mail','mail-inbox'].includes(action) && !(error?.authenticationFailed||error?.code==='EAUTH'||error?.serverResponseCode==='AUTHENTICATIONFAILED')) {
+   if (['mail','mail-inbox','mail-folders','mail-folder','mail-labels'].includes(action) && !(error?.authenticationFailed||error?.code==='EAUTH'||error?.serverResponseCode==='AUTHENTICATIONFAILED')) {
     const reference=randomBytes(6).toString('hex');
     const code=typeof error?.code==='string'&&/^[A-Z][A-Z0-9_]{0,31}$/.test(error.code)?error.code:
      error instanceof TypeError?'TypeError':error instanceof RangeError?'RangeError':'Error';
     console.warn('[IONOS] Mailbox refresh failed',{reference,stage:mailStage,code});
-    return reply({error:action==='mail-inbox'?'The app could not load recent Inbox messages.':'The app could not complete the full mailbox refresh.',reference},502);
+    return reply({error:action==='mail-labels'?'Mailbox labels are temporarily unavailable.':'The app could not refresh this mailbox view.',reference},502);
    }
    if (admin&&!(error instanceof TypeError)&&!error?.authenticationFailed&&error?.code!=='EAUTH') {
     await admin.record(session?.email||session?.highLevel?.email||'','error');

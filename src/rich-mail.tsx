@@ -71,7 +71,7 @@ function safeUrl(value:string, protocols:string[]) {
  } catch {return '';}
 }
 
-export type MailBody={body:string;truncated:boolean;html?:string;images?:Record<string,string>};
+export type MailBody={attachments?:import('./attachment-preview').MailAttachment[];body:string;truncated:boolean;html?:string;images?:Record<string,string>};
 
 export function RichMail({html,images,dark}:{html:string;images?:Record<string,string>;dark:boolean}) {
  const host=useRef<HTMLDivElement>(null);
