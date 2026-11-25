@@ -997,10 +997,11 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    const linksText=links.length?'\n\nDownloads (links expire in 7 days)\n'+links.map(link=>link.name+'\n'+link.url).join('\n\n'):'';
    const linksHtml=links.length?'<p>Downloads (links expire in 7 days)</p><ul>'+links.map(link=>'<li><a href="'+escape(link.url)+'">'+escape(link.name)+'</a></li>').join('')+'</ul>':'';
    const inlineHtml=inline?'<p><img src="cid:'+cid+'" alt="Email signature" style="max-width:320px;height:auto"></p>':'';
-   const html=inline||links.length?'<div style="white-space:pre-wrap">'+escape(body)+'</div>'+inlineHtml+linksHtml:undefined;
+   const html='<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">'+
+    escape(body).replace(/\r\n|\r|\n/g,'<br>')+'</div>'+inlineHtml+linksHtml;
    if (inline) attachments.push({filename:'signature.'+inline.type.split('/')[1],content:inline.content,contentType:inline.type,cid});
    const message = {
-    from:config.email,to,cc,bcc,subject,text:body+linksText,html,attachments:[...attachments,...uploaded],
+    from:config.email,to,cc,bcc,subject,text:body+linksText,html,textEncoding:'quoted-printable',attachments:[...attachments,...uploaded],
     messageId:'<'+id+'@'+config.email.split('@')[1]+'>',
     references:refs,inReplyTo:refs.at(-1),disableFileAccess:true,disableUrlAccess:true,
    };

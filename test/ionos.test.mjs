@@ -652,6 +652,40 @@ test('large file links sign upload parts for 1 GB and send a time-limited privat
  await assert.rejects(storage.begin({draftId,file:{...file,size:LARGE_FILE_LIMIT+1}}),/up to 1 GB/);
 });
 
+test('outbound MIME preserves Unicode, readable line breaks and a binary attachment', async () => {
+ const {default:nodemailer}=await import('nodemailer');
+ const {simpleParser}=await import('mailparser');
+ const stream=nodemailer.createTransport({streamTransport:true,buffer:true});
+ let mime;
+ class NoSentFolder {
+  async connect() {}
+  async list() { return []; }
+  close() {}
+ }
+ const mailbox=createIonosMailbox(ionosConfig(env),{
+  Imap:NoSentFolder,
+  transport:()=>({async sendMail(message) {
+   const result=await stream.sendMail(message);
+   mime=result.message;
+   return result;
+  }}),
+ });
+ const body='你好 👋\n\nCafé & <details>';
+ const bytes=Buffer.from([0,128,255,13,10]);
+ await mailbox.send({
+  id:'out-12345678-1234-1234-1234-123456789012',to:'recipient@example.com',
+  subject:'Résumé',body,attachments:[{name:'sample.bin',data:bytes.toString('base64')}],
+ });
+ const raw=mime.toString();
+ assert.equal((raw.match(/^Content-Transfer-Encoding: quoted-printable$/gim)||[]).length,2);
+ assert.match(raw,/^Content-Transfer-Encoding: base64$/im);
+ const parsed=await simpleParser(mime);
+ assert.equal(parsed.text.replace(/\r\n/g,'\n'),body);
+ assert.match(parsed.html,/你好 👋<br><br>Café &amp; &lt;details&gt;/);
+ assert.equal(parsed.subject,'Résumé');
+ assert.deepEqual(parsed.attachments[0].content,bytes);
+});
+
 test('Bcc is routed by SMTP without a public header and preserved in the sender’s Sent copy', async () => {
  const {default:nodemailer}=await import('nodemailer');
  let smtpEnvelope,smtpHeaders,sentHeaders;
