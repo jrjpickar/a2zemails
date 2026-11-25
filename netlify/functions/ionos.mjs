@@ -456,7 +456,17 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     });
     const data=await mailboxTemperatures({...rest,mail:shown},canReadTemperature?temperature:null);
     await admin.record(login.email,'open',{throttle:true});
-    return reply({...data,askAi:aiEnabled(ai),profile});
+    // Parsed previews can expand well beyond the raw IMAP byte budget after JSON encoding.
+    // Keep recent rows available and let the reader fetch full bodies on demand.
+    let previewBytesLeft=1_000_000;
+    const mail=data.mail.map(row=>{
+     if (!row.body) return row;
+     const bytes=Buffer.byteLength(JSON.stringify(row.body));
+     if (bytes>previewBytesLeft) return {...row,body:'',needsBody:true};
+     previewBytesLeft-=bytes;
+     return row;
+    });
+    return reply({...data,mail,askAi:aiEnabled(ai),profile});
    }
    if ((action==='ai-write'||action==='ai-replies') && request.method==='POST') {
     const input=await readInput(request,64000);

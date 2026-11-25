@@ -135,8 +135,8 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   if (!onSignOut) return localRequest(path,body,signal);
   try { return await hostedRequest(path,body,liveToken,signal); }
   catch (error) {
-   const failure=error as {status?:number;reason?:string};
-   if (failure.status===401 || failure.reason==='ghl_ionos_unavailable') void onSignOut(error).catch(()=>setToast('Your session ended. Reload to sign in again.'));
+   const failure=error as {status?:number};
+   if (failure.status===401) void onSignOut(error).catch(()=>setToast('Your session ended. Reload to sign in again.'));
    throw error;
   }
  }
@@ -150,6 +150,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const [account,setAccount]=useState('');
  const [mailFolders,setMailFolders]=useState<string[]>([]);
  const [connection,setConnection]=useState(liveToken?'Connecting to IONOS…':'');
+ const [mailboxIssue,setMailboxIssue]=useState('');
  const [sending,setSending]=useState(false);
  const [deleteTarget,setDeleteTarget]=useState<Message|null>(null);
  const hosted=Boolean(onSignOut);
@@ -196,9 +197,11 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  }
  async function fetchMailbox(revision:number) {
   setConnection('Connecting to IONOS…');
+  setMailboxIssue('');
   try {
-   const data: {email:string;mail:Message[];contacts:Contact[];folders?:string[];askAi?:boolean;temperatureFolders?:boolean;temperatureUnavailable?:boolean;profile?:Profile} = await liveRequest('mail');
+   const data: {email:string;mail:Message[];contacts:Contact[];folders?:string[];askAi?:boolean;temperatureFolders?:boolean;temperatureUnavailable?:boolean;profile?:Profile;unavailableFolders?:string[]} = await liveRequest('mail');
    if (revision!==mailboxRevision.current) return;
+   if (!Array.isArray(data.mail) || typeof data.email!=='string') throw new Error('The mailbox service returned an incomplete response.');
    setKnownContacts(data.contacts||[]);
    setMailFeatures({askAi:!!data.askAi,temperatureFolders:!!data.temperatureFolders,temperatureUnavailable:!!data.temperatureUnavailable});
    setAccount(data.email);
@@ -206,10 +209,11 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    setMailFolders((data.folders||[]).filter(folder=>!groups[1].links.some(([name])=>name===folder))
     .sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'})));
    const fetched=new Set(data.mail.map(message=>message.id));
+   const unavailable=new Set(data.unavailableFolders);
    setState(previous=>({...previous,mail:[
     ...data.mail,
     // Keep older pages the user loaded. Refresh only replaces the recent window.
-    ...previous.mail.filter(message=>message.older&&!fetched.has(message.id)),
+    ...previous.mail.filter(message=>(message.older||unavailable.has(message.folder))&&!fetched.has(message.id)&&!message.id.startsWith('out-')),
     ...previous.mail.filter(message=>message.folder==='Sent' && message.id.startsWith('out-') &&
       !data.mail.some(fetched=>fetched.headers.messageId===message.headers.messageId))
    ]}));
@@ -218,8 +222,13 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     return data.mail.some(message=>message.id===current)?current:data.mail[0]?.id||'';
    });
    setConnection('IONOS connected');
+   if (unavailable.size) setMailboxIssue('Some folders could not load: '+[...unavailable].join(', ')+'.');
   } catch (error) {
-   setConnection(error instanceof Error ? error.message : 'Unable to connect to IONOS.');
+   if (revision!==mailboxRevision.current) return;
+   setConnection('Mailbox refresh failed');
+   const requestId=(error as {requestId?:string})?.requestId;
+   const message=error instanceof Error ? error.message : 'Unable to connect to IONOS.';
+   setMailboxIssue(message+(requestId?' (Request ID: '+requestId+')':''));
   }
  }
  useEffect(()=>{if(liveToken)void refreshMailbox()},[]);
@@ -1108,6 +1117,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <div className="list-toolbar">{marked.length?<><button onClick={()=>setMarked([])}>{marked.length} selected ×</button><button title="Archive selected" className="icon" onClick={()=>move(marked,'Archive')}><Archive size={16}/></button><button title="Delete selected" className="icon" onClick={()=>move(marked,'Trash')}><Trash2 size={16}/></button></>:<><div className="tabs">{['All mail','Unread'].map(f=><button key={f} className={filter===f?'on':''} onClick={()=>{setFilter(f);setLimit(60)}} disabled={!!query}>{f}{f==='Unread'&&nav==='Inbox'&&<span>{unreadIncoming}</span>}</button>)}</div><button className={'icon '+(!['All mail','Unread'].includes(filter)?'accent':'')} title="Filter messages" onClick={()=>setMenu(menu==='filters'?'':'filters')}><SlidersHorizontal size={17}/></button></>}
  {menu==='filters'&&<div className="popover filters">{['All mail','Unread','Starred','Attachments','Incoming','Urgent'].map(f=><button key={f} onClick={()=>{setFilter(f);setMenu('')}}>{f}{filter===f&&<Check size={14}/>}</button>)}</div>}</div>
  <div className="rows">
+ {mailboxIssue&&<div className="empty" role="alert">{mailboxIssue} <button type="button" className="project-tag" onClick={()=>void refreshMailbox()}>Retry mailbox</button></div>}
  {nav==='Drafts'&&!query?draftList.length?draftList.map(d=><button className="draft-row" key={d.id} disabled={saving} onClick={()=>reopenDraft(d.id)}><span className="tag rose">Draft</span><b>{d.subject||'(No subject)'}</b><span>{d.to||'No recipient'}</span></button>):<div className="empty">{draftSyncError||'No drafts yet.'}{draftSyncError&&<button className="project-tag" onClick={()=>void syncPreferences()}>Retry</button>}</div>:list.length?list.slice(0,limit).map((m,i)=><div key={m.id} className={'mail-row '+(m.id===currentRow?.id?'selected ':'')+(m.unread?'unread':'')}>
  <div className="row-side"><input type="checkbox" disabled={!!liveToken} aria-label={'Select '+m.subject} checked={marked.includes(m.id)} onChange={e=>setMarked(e.target.checked?[...marked,m.id]:marked.filter(x=>x!==m.id))}/><button className={'star '+(m.star?'starred':'')} disabled={!!liveToken&&m.id.startsWith('out-')} title={m.star?'Remove star':'Star message'} onClick={()=>change([m.id],{star:!m.star})}><Star size={14}/></button></div>
  <button className="row-content" onClick={()=>open(m)}><div className="row-top"><span className={'avatar mini '+avatarColors[i%5]}>{initials(m.name)}</span><b>{m.folder==='Sent'?'To: '+m.to:m.name}</b><MessageTimestamp value={m.date}/></div><strong>{m.subject}</strong><p>{m.body.replace(/\s+/g,' ')}</p><div className="row-foot">{tag(m)}{m.folder!=='Inbox'&&(m.folder==='Sent'&&liveToken?<span className={'tag delivery '+(deliveryLabels[m.delivery?.status||'sent']||deliveryLabels.sent)[1]} title={deliveryTitle(m.delivery)}>{(deliveryLabels[m.delivery?.status||'sent']||deliveryLabels.sent)[0]}</span>:<span className="tag gray">{m.folder}</span>)}{m.files.length>0&&<span className="paper-count"><Paperclip size={13}/>{m.files.length}</span>}{m.unread&&<i className="unread-dot"/>}</div></button>

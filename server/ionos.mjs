@@ -26,7 +26,7 @@ const folderAliases = new Map([
 const retainedTrash = 'A2Z Trash';
 const isRetainedTrash = entry => entry.path.toLowerCase() === retainedTrash.toLowerCase();
 const folderName = entry => isRetainedTrash(entry) ? 'Trash' : standardFolders.get(entry.specialUse) || folderAliases.get(entry.path.toLowerCase()) || entry.path;
-const isMailFolder = entry => !entry.flags.has('\\Noselect') && entry.specialUse !== '\\Drafts' && !/(?:^|[./])drafts$/i.test(entry.path);
+const isMailFolder = entry => !entry.flags?.has('\\Noselect') && entry.specialUse !== '\\Drafts' && !/(?:^|[./])drafts$/i.test(entry.path);
 
 export function ionosConfig(env) {
  if (env.A2Z_MODE !== 'live' || env.A2Z_ENABLE_LIVE !== 'true') {
@@ -50,7 +50,11 @@ export function ionosConfig(env) {
 }
 
 function addressList(items) {
- return (items||[]).map(address=>address.address).filter(Boolean).join(', ');
+ return (items||[]).map(address=>address?.address).filter(Boolean).join(', ');
+}
+
+function isoDate(value) {
+ return value instanceof Date && Number.isFinite(value.getTime()) ? value.toISOString() : null;
 }
 
 function mimeReferences(parsed, envelope) {
@@ -286,6 +290,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   const contacts = new Map();
   const reports = [];
   let folders;
+  const unavailableFolders = new Set();
   let previewBudget = 3_000_000;
   try {
    await imap.connect();
@@ -294,30 +299,31 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    folders.sort((a,b)=>priority(a)-priority(b));
    for (const entry of folders) {
     const folder = folderName(entry);
-    const lock = await imap.getMailboxLock(entry.path, {readOnly:true});
+    let lock;
     try {
+     lock = await imap.getMailboxLock(entry.path, {readOnly:true});
      const {exists,uidValidity} = imap.mailbox;
      if (!exists) continue;
      const count = folder === 'Inbox' ? 200 : 25;
      const range = Math.max(1,exists-count+1)+':'+exists;
      const metadata = await imap.fetchAll(range,{uid:true,envelope:true,internalDate:true,flags:true,size:true,bodyStructure:true});
      const eligible = metadata.slice(-count).reverse().filter(item=>{
-      if (item.flags.has('\\Deleted') || item.size>768000 || item.size>previewBudget) return false;
+      if (item.flags?.has('\\Deleted') || !Number.isFinite(item.size) || item.size<0 || item.size>768000 || item.size>previewBudget) return false;
       previewBudget -= item.size;
       return true;
      }).map(item=>item.uid);
-     const sources = eligible.length ? await imap.fetchAll(eligible,{uid:true,source:true},{uid:true}) : [];
+     const sources = eligible.length ? await imap.fetchAll(eligible,{uid:true,source:true},{uid:true}).catch(()=>[]) : [];
      const rawByUid = new Map(sources.map(item=>[item.uid,item.source]));
-     const previews = await textPreviews(imap,metadata.filter(item=>!item.flags.has('\\Deleted')&&!rawByUid.has(item.uid)));
+     const previews = await textPreviews(imap,metadata.filter(item=>!item.flags?.has('\\Deleted')&&!rawByUid.has(item.uid)));
      for (const item of metadata) {
-      if (item.flags.has('\\Deleted')) continue;
+      if (item.flags?.has('\\Deleted')) continue;
       const raw = rawByUid.get(item.uid);
       const parsed = raw ? await parser(raw,{skipHtmlToText:false,skipImageLinks:true}).catch(()=>null) : null;
       const {envelope}=item;
       const from = addressList(envelope?.from);
       if (!['Spam','Trash'].includes(folder)) {
        for (const contact of [...(envelope?.from||[]),...(envelope?.to||[]),...(envelope?.cc||[])]) {
-        const address = contact.address?.toLowerCase();
+        const address = contact?.address?.toLowerCase();
         if (!address || !mailboxAddress.test(address) || address===config.email.toLowerCase()) continue;
         if (!contacts.has(address) && contacts.size>=1000) continue;
         if (!contacts.get(address)?.name) contacts.set(address,{address,name:contact.name||''});
@@ -327,7 +333,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
       if (folder==='Inbox' && raw) {
        const report = deliveryReport(raw,{from,subject:envelope?.subject||''});
        if (report) {
-        reports.push({...report,messageId:id,date:item.internalDate?.toISOString()||new Date().toISOString(),
+        reports.push({...report,messageId:id,date:isoDate(item.internalDate)||new Date().toISOString(),
          successOnly:report.recipients.every(entry=>['delivered','relayed','expanded'].includes(entry.action))});
        }
       }
@@ -340,15 +346,18 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
       const attachments = attachedFiles(item.bodyStructure);
       mail.push({
        id, thread:references[0]||headerId||id, name:envelope?.from?.[0]?.name||from||'Unknown sender',
-       company:'', subject, body, needsBody, date:item.internalDate?.toISOString()||new Date(0).toISOString(),
+       company:'', subject, body, needsBody, date:isoDate(item.internalDate)||new Date(0).toISOString(),
        from,to:addressList(envelope?.to),cc:addressList(envelope?.cc),bcc:folder==='Sent'?(addressList(envelope?.bcc)||addressList(parsed?.bcc?.value)):'',
-       category,project:matchProject(subject+' '+body),folder,unread:!item.flags.has('\\Seen'),star:item.flags.has('\\Flagged'),
+       category,project:matchProject(subject+' '+body),folder,unread:!item.flags?.has('\\Seen'),star:Boolean(item.flags?.has('\\Flagged')),
        files:attachments.length?attachments.map(file=>file.name):(parsed?.attachments||[]).map(file=>file.filename||'Attachment'),attachments,
        due:category==='Bid Invitations'?bidDue(subject,body):undefined,
        headers:{messageId:headerId,references},
       });
      }
-    } finally { lock.release(); }
+    } catch (error) {
+     if (folder==='Inbox') throw error;
+     unavailableFolders.add(folder);
+    } finally { lock?.release(); }
    }
   } finally { imap.close(); }
   // Categories saved by the scheduled 9 AM / 3 PM AI sort are reused, so only new mail goes to the model.
@@ -369,6 +378,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    row.due = category==='Bid Invitations' ? bidDue(row.subject,row.body) : undefined;
   }
   return {email:config.email,folders:[...new Set(folders.map(folderName))],contacts:[...contacts.values()],mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),reports,
+   ...(unavailableFolders.size?{unavailableFolders:[...unavailableFolders]}:{}),
    ...(config.returnAiLabels?{aiLabels:Object.fromEntries(aiLabels)}:{})};
  }
 
@@ -393,8 +403,8 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   return {
    id:folder+':'+generation+':'+item.uid,
    uid:item.uid,subject:envelope.subject||'(No subject)',
-   date:item.internalDate?.toISOString()||null,
-   sentAt:envelope.date?.toISOString()||null,
+   date:isoDate(item.internalDate)||null,
+   sentAt:isoDate(envelope.date)||null,
    from:addressList(envelope.from),to:addressList(envelope.to),cc:addressList(envelope.cc),bcc:addressList(envelope.bcc),
    replyTo:addressList(envelope.replyTo),messageId:envelope.messageId||'',inReplyTo:envelope.inReplyTo||'',
    flags:[...flags],bytes:item.size||0,attachments:attachedFiles(item.bodyStructure),
@@ -707,7 +717,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
      const preview=currentMessageText(previews.get(item.uid)||'').replace(/\s+/g,' ').trim().slice(0,1200);
      const from=addressList(envelope.from);
      const refs=String(item.headers?.toString?.('utf8')||'').match(/<[^<>\s]+>/g)||[];
-     return {id:path+':'+generation+':'+item.uid,uid:item.uid,path,folder,date:item.internalDate?.toISOString()||null,
+     return {id:path+':'+generation+':'+item.uid,uid:item.uid,path,folder,date:isoDate(item.internalDate)||null,
       from,fromName:envelope.from?.[0]?.name||'',to:addressList(envelope.to),cc:addressList(envelope.cc),subject,
       messageId:envelope.messageId||'',inReplyTo:envelope.inReplyTo||'',refs:refs.slice(-6),
       flags:[...(item.flags||[])].filter(flag=>/^\\(Seen|Answered|Flagged)$/.test(flag)),
@@ -919,7 +929,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    try {
     await imap.connect();
     const folders = await imap.list();
-    const source = folders.find(entry=>entry.path===path && !entry.flags.has('\\Noselect'));
+    const source = folders.find(entry=>entry.path===path && !entry.flags?.has('\\Noselect'));
     if (permanent && (!source || folderName(source)!=='Trash')) {
      return {error:'Move the message to Trash before deleting it forever.'};
     }
@@ -929,15 +939,15 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     let target;
     if (destination==='Trash') {
      if (source && folderName(source)==='Trash') return {ok:true};
-     target=folders.find(entry=>isRetainedTrash(entry)&&!entry.flags.has('\\Noselect'));
+     target=folders.find(entry=>isRetainedTrash(entry)&&!entry.flags?.has('\\Noselect'));
      if (!target) {
       try { await imap.mailboxCreate(retainedTrash); } catch {
        // A concurrent move may already have created the folder.
       }
-      target=(await imap.list()).find(entry=>isRetainedTrash(entry)&&!entry.flags.has('\\Noselect'));
+      target=(await imap.list()).find(entry=>isRetainedTrash(entry)&&!entry.flags?.has('\\Noselect'));
      }
     } else if (destination) {
-     target=folders.find(entry=>!entry.flags.has('\\Noselect') && folderName(entry)===destination);
+     target=folders.find(entry=>!entry.flags?.has('\\Noselect') && folderName(entry)===destination);
     }
     if (destination && !target) return {error:'That folder is unavailable in IONOS.'};
     const lock = await imap.getMailboxLock(path);

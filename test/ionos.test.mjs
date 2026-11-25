@@ -95,6 +95,31 @@ test('IONOS adapter reads a message and sends a signed reply using the authentic
  assert.equal(appendSignature('Reply','  '),'Reply');
 });
 
+test('recent mail survives a rejected custom folder, missing flags, and an invalid timestamp', async () => {
+ class FakeImap {
+  async connect() {}
+  async list() { return ['INBOX','Unavailable folder','Sent'].map(path=>({path,flags:new Set()})); }
+  async getMailboxLock(path) {
+   if (path==='Unavailable folder') throw new Error('Folder unavailable');
+   this.path=path;
+   this.mailbox={exists:1,uidValidity:22n};
+   return {release() {}};
+  }
+  async fetchAll(_range,fields) {
+   if (fields.source) throw new Error('Message source unavailable');
+   return [{uid:1,size:200,internalDate:new Date(NaN),envelope:{subject:this.path,from:[null]}}];
+  }
+  close() {}
+ }
+ const adapter=createIonosMailbox(ionosConfig(env),{Imap:FakeImap,transport:()=>({})});
+ const {mail,unavailableFolders}=await adapter.mail();
+ assert.deepEqual(unavailableFolders,['Unavailable folder']);
+ assert.deepEqual(mail.map(row=>row.folder),['Inbox','Sent']);
+ assert.equal(mail[0].date,'1970-01-01T00:00:00.000Z');
+ assert.equal(mail[0].needsBody,true);
+ assert.equal(mail[0].unread,true);
+});
+
 function groqReply(results) {
  return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({results})}}]});
 }
@@ -150,6 +175,7 @@ test('Command Center sorts deadlines and returns to awaiting reply after a new i
 test('hosted mailbox login requires an allowed address and an authenticated unmodified session', async () => {
  const {createHostedHandler} = await import('../netlify/functions/ionos.mjs');
  let loginCount=0;
+ let mail=[];
  class FakeImap {
   constructor(config) { assert.equal(config.auth.user,env.IONOS_EMAIL); assert.equal(config.auth.pass,env.IONOS_PASSWORD); }
   on() {}
@@ -161,7 +187,7 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
   IONOS_ALLOWED_MAILBOXES:env.IONOS_EMAIL,
  },{
   Imap:FakeImap,
-  mailboxFactory:config=>({mail:async()=>({email:config.email,mail:[],contacts:[]})}),
+  mailboxFactory:config=>({mail:async()=>({email:config.email,mail,contacts:[]})}),
  });
  const call=(action,{body,token,origin,cookie}={})=>handler(new Request('https://test.example/.netlify/functions/ionos?action='+action,{
   method:body?'POST':'GET',
@@ -180,6 +206,16 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
  const response=await call('mail',{token});
  assert.equal(response.headers.get('cache-control'),'no-store');
  assert.equal((await response.json()).email,env.IONOS_EMAIL);
+ mail=Array.from({length:12},(_,index)=>({id:String(index),folder:'Inbox',body:'😀'.repeat(45000)}));
+ const oversized=await call('mail',{token});
+ const bounded=await oversized.text();
+ assert.ok(Buffer.byteLength(bounded)<1_010_000);
+ const rows=JSON.parse(bounded).mail;
+ assert.equal(rows.length,12);
+ assert.ok(rows[0].body);
+ assert.equal(rows.at(-1).body,'');
+ assert.equal(rows.at(-1).needsBody,true);
+ mail=[];
  const saved=await call('login',{body:{email:env.IONOS_EMAIL,password:env.IONOS_PASSWORD,remember:true}});
  const remembered=(await saved.json()).token;
  assert.equal(remembered,'MailboxCookie');
