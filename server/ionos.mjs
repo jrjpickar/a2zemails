@@ -389,12 +389,12 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   finally {imap.close();}
  }
 
- async function readFolder(folder,operation) {
+ async function readFolder(folder,operation,options) {
   return readConnection(async imap=>{
    const lock=await imap.getMailboxLock(folder,{readOnly:true});
    try {return await operation(imap);}
    finally {lock.release();}
-  });
+  },options);
  }
 
  function messageMetadata(item,folder,generation) {
@@ -439,6 +439,36 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    if (!includeTrash) return readMail(false);
    if (!fetching) fetching = readMail(true).finally(()=>{fetching=undefined});
    return fetching;
+  },
+  inboxSummary() {
+   // Recovery path for a mailbox that authenticates but cannot complete the full refresh.
+   return readFolder('INBOX',async imap=>{
+    const {exists,uidValidity}=imap.mailbox;
+    const mail=[];
+    if (exists) {
+     const rows=await imap.fetchAll(Math.max(1,exists-59)+':'+exists,{
+      uid:true,envelope:true,internalDate:true,flags:true,
+     });
+     for (const item of rows) {
+      if (item.flags?.has('\\Deleted')) continue;
+      const {envelope}=item;
+      const id='INBOX:'+uidValidity+':'+item.uid;
+      const subject=envelope?.subject||'(No subject)';
+      const from=addressList(envelope?.from);
+      const headerId=envelope?.messageId||'';
+      const references=mimeReferences(null,envelope);
+      mail.push({
+       id,thread:references[0]||headerId||id,name:envelope?.from?.[0]?.name||from||'Unknown sender',
+       subject,from,to:addressList(envelope?.to),cc:addressList(envelope?.cc),
+       company:'',body:'',needsBody:true,date:isoDate(item.internalDate)||new Date(0).toISOString(),
+       folder:'Inbox',category:classify(subject,'',from),project:'',files:[],
+       unread:!item.flags?.has('\\Seen'),star:Boolean(item.flags?.has('\\Flagged')),
+       headers:{messageId:headerId,references},
+      });
+     }
+    }
+    return {email:config.email,mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),inboxOnly:true};
+   },{connectionTimeout:8000,greetingTimeout:8000,socketTimeout:8000});
   },
   folders() {
    return readConnection(async imap=>(await imap.list()).filter(

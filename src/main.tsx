@@ -199,21 +199,37 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   setConnection('Connecting to IONOS…');
   setMailboxIssue('');
   try {
-   const data: {email:string;mail:Message[];contacts:Contact[];folders?:string[];askAi?:boolean;temperatureFolders?:boolean;temperatureUnavailable?:boolean;profile?:Profile;unavailableFolders?:string[]} = await liveRequest('mail');
+   type MailboxResponse={email:string;mail:Message[];contacts?:Contact[];folders?:string[];askAi?:boolean;temperatureFolders?:boolean;temperatureUnavailable?:boolean;profile?:Profile;unavailableFolders?:string[];inboxOnly?:boolean};
+   let data:MailboxResponse;
+   let fullRefreshReference='';
+   try {
+    data=await liveRequest('mail',undefined,hosted?AbortSignal.timeout(20000):undefined);
+    if (!Array.isArray(data.mail) || typeof data.email!=='string') throw new Error('The mailbox service returned an incomplete response.');
+   } catch (error) {
+    const failure=error as {status?:number;requestId?:string};
+    if (!hosted || revision!==mailboxRevision.current || (failure.status && failure.status<500)) throw error;
+    fullRefreshReference=failure.requestId||'';
+    setConnection('Loading recent Inbox messages…');
+    data=await liveRequest('mail-inbox',undefined,AbortSignal.timeout(24000));
+   }
    if (revision!==mailboxRevision.current) return;
    if (!Array.isArray(data.mail) || typeof data.email!=='string') throw new Error('The mailbox service returned an incomplete response.');
-   setKnownContacts(data.contacts||[]);
-   setMailFeatures({askAi:!!data.askAi,temperatureFolders:!!data.temperatureFolders,temperatureUnavailable:!!data.temperatureUnavailable});
+   if (!data.inboxOnly) {
+    setKnownContacts(data.contacts||[]);
+    setMailFeatures({askAi:!!data.askAi,temperatureFolders:!!data.temperatureFolders,temperatureUnavailable:!!data.temperatureUnavailable});
+   } else {
+    setMailFeatures(previous=>({...previous,askAi:!!data.askAi}));
+   }
    setAccount(data.email);
    if (data.profile) setProfile({name:data.profile.name,admin:!!data.profile.admin});
-   setMailFolders((data.folders||[]).filter(folder=>!groups[1].links.some(([name])=>name===folder))
+   if (!data.inboxOnly) setMailFolders((data.folders||[]).filter(folder=>!groups[1].links.some(([name])=>name===folder))
     .sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'})));
    const fetched=new Set(data.mail.map(message=>message.id));
    const unavailable=new Set(data.unavailableFolders);
    setState(previous=>({...previous,mail:[
     ...data.mail,
     // Keep older pages the user loaded. Refresh only replaces the recent window.
-    ...previous.mail.filter(message=>(message.older||unavailable.has(message.folder))&&!fetched.has(message.id)&&!message.id.startsWith('out-')),
+    ...previous.mail.filter(message=>(message.older||unavailable.has(message.folder)||(data.inboxOnly&&message.folder!=='Inbox'))&&!fetched.has(message.id)&&!message.id.startsWith('out-')),
     ...previous.mail.filter(message=>message.folder==='Sent' && message.id.startsWith('out-') &&
       !data.mail.some(fetched=>fetched.headers.messageId===message.headers.messageId))
    ]}));
@@ -221,8 +237,10 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     if (current.startsWith('out-')) return data.mail.find(message=>message.headers.messageId.startsWith('<'+current+'@'))?.id||current;
     return data.mail.some(message=>message.id===current)?current:data.mail[0]?.id||'';
    });
-   setConnection('IONOS connected');
-   if (unavailable.size) setMailboxIssue('Some folders could not load: '+[...unavailable].join(', ')+'.');
+   setConnection(data.inboxOnly?'Recent Inbox only':'IONOS connected');
+   if (data.inboxOnly) setMailboxIssue('Recent Inbox messages loaded. Retry to refresh all folders.'+
+    (fullRefreshReference?' (Reference: '+fullRefreshReference+')':''));
+   else if (unavailable.size) setMailboxIssue('Some folders could not load: '+[...unavailable].join(', ')+'.');
   } catch (error) {
    if (revision!==mailboxRevision.current) return;
    setConnection('Mailbox refresh failed');

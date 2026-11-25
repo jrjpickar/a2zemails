@@ -206,6 +206,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    return reply({error:'Expected a JSON request.'},415);
   }
   let session;
+  let mailStage='session';
   try {
    if (action==='login' && request.method==='POST') {
     const input = await readInput(request,4096);
@@ -255,6 +256,11 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     name:access.namedByAdmin?access.name:(session.highLevel?.name||access.name)};
    if (usesCookie && action==='session' && request.method==='GET') return reply({email:login.email,profile});
    if (action==='profile' && request.method==='GET') return reply({profile});
+   if (action==='mail-inbox' && request.method==='GET') {
+    mailStage='inbox-summary';
+    const data=await mailboxFactory(configFor(login)).inboxSummary();
+    return reply({...data,askAi:aiEnabled(ai),profile});
+   }
    if (action==='team' && request.method==='GET') {
     if (!access.admin) return reply({error:'Only a senior admin can manage team access.'},403);
     return reply({users:await directory.list()});
@@ -403,6 +409,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     await preferencesFactory(login.email).saveSignature(input?.signature,input?.image);
     return reply({ok:true});
    }
+   mailStage='mailbox-setup';
    const mailbox = mailboxFactory({...configFor(login),keywords:await admin.keywords(),
     ...(action==='mail'?{storedLabels:await aiLabels.load(login.email)}:{})});
    if (action==='bid-inspect' && request.method==='POST') {
@@ -435,7 +442,9 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    }
    if (action==='mail' && request.method==='GET') {
     const canReadTemperature=temperature&&(!session.highLevel||session.highLevel.activeLocation===temperature.locationId);
+    mailStage='full-mailbox';
     const loaded=await mailbox.mail();
+    mailStage='mailbox-enrichment';
     const {reports=[],...rest}=loaded;
     let shown=rest.mail;
     if (reports.length) {
@@ -466,6 +475,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
      previewBytesLeft-=bytes;
      return row;
     });
+    mailStage='mailbox-response';
     return reply({...data,mail,askAi:aiEnabled(ai),profile});
    }
    if ((action==='ai-write'||action==='ai-replies') && request.method==='POST') {
@@ -569,6 +579,13 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    if (action==='update' && request.method==='POST') return reply(await mailbox.update(await readInput(request,4096)));
    return reply({error:'Unknown mailbox action.'},404);
   } catch(error) {
+   if (['mail','mail-inbox'].includes(action) && !(error?.authenticationFailed||error?.code==='EAUTH'||error?.serverResponseCode==='AUTHENTICATIONFAILED')) {
+    const reference=randomBytes(6).toString('hex');
+    const code=typeof error?.code==='string'&&/^[A-Z][A-Z0-9_]{0,31}$/.test(error.code)?error.code:
+     error instanceof TypeError?'TypeError':error instanceof RangeError?'RangeError':'Error';
+    console.warn('[IONOS] Mailbox refresh failed',{reference,stage:mailStage,code});
+    return reply({error:action==='mail-inbox'?'The app could not load recent Inbox messages.':'The app could not complete the full mailbox refresh.',reference},502);
+   }
    if (admin&&!(error instanceof TypeError)&&!error?.authenticationFailed&&error?.code!=='EAUTH') {
     await admin.record(session?.email||session?.highLevel?.email||'','error');
    }
@@ -606,10 +623,6 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     return reply({error:mailboxSignInError},401);
    }
    if (action==='mail-search') return reply({error:'IONOS search could not connect. Recent matches are still available. Retry the mailbox search.'},503);
-   if (session?.highLevel && action==='mail') {
-    console.warn('[IONOS] HighLevel session accepted; mailbox connection failed.');
-    return reply({error:'HighLevel signed you in, but Inbox could not open the IONOS mailbox.',reason:'ghl_ionos_unavailable'},502);
-   }
    return reply({error:action==='send'
     ? 'IONOS did not confirm delivery. Check Sent before retrying.'
     : 'IONOS could not complete the request. Try again.'},502);

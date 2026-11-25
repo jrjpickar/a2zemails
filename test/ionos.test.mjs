@@ -120,6 +120,35 @@ test('recent mail survives a rejected custom folder, missing flags, and an inval
  assert.equal(mail[0].unread,true);
 });
 
+test('Inbox recovery fetches only the latest envelopes from INBOX', async () => {
+ let released=false,closed=false;
+ class FakeImap {
+  async connect() {}
+  async list() { assert.fail('Recovery must not enumerate folders'); }
+  async getMailboxLock(path,options) {
+   assert.equal(path,'INBOX');
+   assert.deepEqual(options,{readOnly:true});
+   this.mailbox={exists:200,uidValidity:22n};
+   return {release() { released=true; }};
+  }
+  async fetchAll(range,fields) {
+   assert.equal(range,'141:200');
+   assert.deepEqual(fields,{uid:true,envelope:true,internalDate:true,flags:true});
+   return [
+    {uid:12,flags:new Set(['\\Deleted'])},
+    {uid:13,flags:new Set(['\\Seen']),envelope:{subject:'A real message'}},
+   ];
+  }
+  close() { closed=true; }
+ }
+ const result=await createIonosMailbox(ionosConfig(env),{Imap:FakeImap,transport:()=>({})}).inboxSummary();
+ assert.equal(result.inboxOnly,true);
+ assert.equal(result.email,env.IONOS_EMAIL);
+ assert.deepEqual(result.mail.map(({id,subject,needsBody,unread})=>({id,subject,needsBody,unread})),
+  [{id:'INBOX:22:13',subject:'A real message',needsBody:true,unread:false}]);
+ assert.ok(released&&closed);
+});
+
 function groqReply(results) {
  return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({results})}}]});
 }
@@ -176,6 +205,7 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
  const {createHostedHandler} = await import('../netlify/functions/ionos.mjs');
  let loginCount=0;
  let mail=[];
+ let fullRefreshError;
  class FakeImap {
   constructor(config) { assert.equal(config.auth.user,env.IONOS_EMAIL); assert.equal(config.auth.pass,env.IONOS_PASSWORD); }
   on() {}
@@ -187,7 +217,13 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
   IONOS_ALLOWED_MAILBOXES:env.IONOS_EMAIL,
  },{
   Imap:FakeImap,
-  mailboxFactory:config=>({mail:async()=>({email:config.email,mail,contacts:[]})}),
+  mailboxFactory:config=>({
+   async mail() {
+    if (fullRefreshError) throw fullRefreshError;
+    return {email:config.email,mail,contacts:[]};
+   },
+   async inboxSummary() {return {email:config.email,mail:[],inboxOnly:true};},
+  }),
  });
  const call=(action,{body,token,origin,cookie}={})=>handler(new Request('https://test.example/.netlify/functions/ionos?action='+action,{
   method:body?'POST':'GET',
@@ -195,6 +231,7 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
   body:body?JSON.stringify(body):undefined,
  }));
  assert.equal((await call('mail')).status,401);
+ assert.equal((await call('mail-inbox')).status,401);
  assert.equal((await call('login',{body:{email:'other@example.com',password:'fixture-only'}})).status,401);
  assert.equal((await call('login',{origin:'https://other.example',body:{email:env.IONOS_EMAIL,password:env.IONOS_PASSWORD}})).status,403);
  const result=await call('login',{body:{email:env.IONOS_EMAIL,password:env.IONOS_PASSWORD}});
@@ -206,6 +243,20 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
  const response=await call('mail',{token});
  assert.equal(response.headers.get('cache-control'),'no-store');
  assert.equal((await response.json()).email,env.IONOS_EMAIL);
+ fullRefreshError=new Error('private fixture detail');
+ const failed=await call('mail',{token});
+ assert.equal(failed.status,502);
+ const failure=await failed.json();
+ assert.match(failure.reference,/^[a-f0-9]{12}$/);
+ assert.doesNotMatch(failure.error,/private fixture detail/);
+ const recovered=await call('mail-inbox',{token});
+ assert.equal(recovered.status,200);
+ const summary=await recovered.json();
+ assert.equal(summary.inboxOnly,true);
+ assert.equal(summary.email,env.IONOS_EMAIL);
+ fullRefreshError=Object.assign(new Error('Bad credentials'),{authenticationFailed:true});
+ assert.equal((await call('mail',{token})).status,401);
+ fullRefreshError=undefined;
  mail=Array.from({length:12},(_,index)=>({id:String(index),folder:'Inbox',body:'😀'.repeat(45000)}));
  const oversized=await call('mail',{token});
  const bounded=await oversized.text();

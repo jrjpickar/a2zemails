@@ -9,11 +9,12 @@ export async function hostedRequest(action:string, body?:object, token?:string, 
   headers:{...(token?{Authorization:token===rememberedSession?token:'Bearer '+token}:{}),...(body?{'Content-Type':'application/json'}:{})},
   body:body?JSON.stringify(body):undefined,
  });
- const data = await response.json().catch(()=>({}));
- if (!response.ok||data.error) {
+ const payload = await response.json().catch(()=>null);
+ const data=payload&&typeof payload==='object'?payload:{};
+ if (!response.ok||!payload||data.error) {
   const error=new Error(data.error||(response.status===429?'Too many mailbox requests. Wait a moment and try again.':
    response.status===502||response.status===503||response.status===504?'The mailbox service did not complete the request. Try again.':'IONOS request failed.'));
-  Object.assign(error,{status:response.status,reason:data.reason,requestId:response.headers.get('x-nf-request-id')});
+  Object.assign(error,{status:response.status,reason:data.reason,requestId:data.reference||response.headers.get('x-nf-request-id')});
   throw error;
  }
  return data;
