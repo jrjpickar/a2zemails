@@ -2,10 +2,11 @@ import {sealBidScan} from '../../server/bid-scan-session.mjs';
 import {bidImportSettings,bidPreview,bookQualifiedBid,currentQualifiedBids,inspectBidEmail,oneEmailBids,qualifiedBids,qualifiedBidCsv} from '../../server/bid-import.mjs';
 import {dayInCalifornia,readBidReport,readBidScanActivity} from '../../server/bid-leads.mjs';
 import {contactsConfig,searchContacts,mailboxTemperatures,temperatureConfig} from '../../server/ghl-contacts.mjs';
-import {aiConfig,aiEnabled,aiModels,askEmail} from '../../server/ask-ai.mjs';
+import {aiConfig,aiEnabled,aiModels,aiReplies,aiWrite,askEmail} from '../../server/ask-ai.mjs';
 import {adminConsole,healthChecks} from '../../server/admin-console.mjs';
 import {aiLabelStore,pacificTime,sortHours} from '../../server/ai-sort.mjs';
 import {noteStore,notesConfig} from '../../server/ghl-notes.mjs';
+import {deliveryStatus,deliveryStore,sendIdFor} from '../../server/deliveries.mjs';
 import nodemailer from 'nodemailer';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { stagedAttachments, stagedFiles, CHUNK_BYTES, MAX_DOWNLOAD_BYTES, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
@@ -59,7 +60,7 @@ async function readInput(request, limit) {
  catch { throw new TypeError('Invalid request body.'); }
 }
 
-export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments,lookupContacts=searchContacts,directoryFactory=teamDirectory,adminFactory=adminConsole,fetcher=fetch,smtpFactory=nodemailer.createTransport,labelsFactory=aiLabelStore,notesFactory=noteStore}={}) {
+export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIonosMailbox,preferencesFactory=mailboxPreferences,uploadsFactory=stagedAttachments,lookupContacts=searchContacts,directoryFactory=teamDirectory,adminFactory=adminConsole,fetcher=fetch,smtpFactory=nodemailer.createTransport,labelsFactory=aiLabelStore,notesFactory=noteStore,deliveriesFactory=deliveryStore}={}) {
  const enabled = env.A2Z_MODE==='live';
  const allowed = new Set((env.IONOS_ALLOWED_MAILBOXES||'').split(',').map(value=>value.trim().toLowerCase()).filter(Boolean));
  const admins = seniorAdmins(env);
@@ -69,6 +70,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  const admin = ready ? adminFactory() : null;
  const aiLabels = ready ? labelsFactory() : null;
  const notes = ready ? notesFactory() : null;
+ const deliveries = ready ? deliveriesFactory() : null;
  const notesSetup = notesConfig(env);
  const highLevelSetup = ready ? createHighLevelLogin(env,allowed,{lookup:email=>directory.credential(email)}) : null;
  const highLevel=highLevelSetup?.login;
@@ -80,6 +82,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
   A2Z_MODE:'live', A2Z_ENABLE_LIVE:'true', IONOS_EMAIL:email, IONOS_PASSWORD:password,
   IONOS_SMTP_PORT:env.IONOS_SMTP_PORT,
   GROQ_API_KEY:env.GROQ_API_KEY,
+  CLOUDFLARE_ACCOUNT_ID:env.CLOUDFLARE_ACCOUNT_ID,CLOUDFLARE_AI_TOKEN:env.CLOUDFLARE_AI_TOKEN,CLOUDFLARE_AI_MODEL:env.CLOUDFLARE_AI_MODEL,
  });
  // Senior admin health checks. Each returns ok, warn or fail with safe detail only (no secrets).
  function healthFor(login) {
@@ -117,6 +120,14 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const model=ai.askGroqModel||aiModels.groq;
     const found=(data?.data||[]).some(item=>item.id===model);
     return found?{detail:model+' available. Web search '+(ai.webSearch?'on':'off')}:{status:'warn',detail:model+' is not listed for this key'};
+   },
+   'Cloudflare Workers AI (backup)':async()=>{
+    if (!ai.cloudflare) return {status:'warn',detail:'Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AI_TOKEN to add the Cloudflare backup'};
+    const response=await timed('https://api.cloudflare.com/client/v4/accounts/'+ai.cloudflareAccount+'/ai/v1/chat/completions',{method:'POST',
+     headers:{Authorization:'Bearer '+ai.cloudflare,'Content-Type':'application/json'},
+     body:JSON.stringify({model:ai.cloudflareModel,max_tokens:1,messages:[{role:'user',content:'ok'}]})});
+    await response.body?.cancel();
+    return {detail:ai.cloudflareModel+' responded'};
    },
    'Gemini (Ask AI backup)':async()=>{
     if (!ai.gemini) return {status:'warn',detail:'GEMINI_API_KEY is not set'};
@@ -415,9 +426,34 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    }
    if (action==='mail' && request.method==='GET') {
     const canReadTemperature=temperature&&(!session.highLevel||session.highLevel.activeLocation===temperature.locationId);
-    const data=await mailboxTemperatures(await mailbox.mail(),canReadTemperature?temperature:null);
+    const loaded=await mailbox.mail();
+    const {reports=[],...rest}=loaded;
+    let shown=rest.mail;
+    if (reports.length) {
+     try {
+      await deliveries.merge(login.email,reports);
+      // Success reports are noise once recorded: file them away and hide them. Bounces stay in Inbox.
+      const filed=reports.filter(report=>report.successOnly).map(report=>report.messageId);
+      if (filed.length&&typeof mailbox.archiveReports==='function') {
+       await mailbox.archiveReports(filed).catch(()=>0);
+       shown=shown.filter(row=>!filed.includes(row.id));
+      }
+     } catch { /* Delivery status is optional; the mailbox still loads. */ }
+    }
+    const statuses=await deliveries.load(login.email);
+    shown=shown.map(row=>{
+     const sendId=row.folder==='Sent'?sendIdFor(row):'';
+     return sendId?{...row,delivery:deliveryStatus(row,statuses[sendId])}:row;
+    });
+    const data=await mailboxTemperatures({...rest,mail:shown},canReadTemperature?temperature:null);
     await admin.record(login.email,'open',{throttle:true});
     return reply({...data,askAi:aiEnabled(ai),profile});
+   }
+   if ((action==='ai-write'||action==='ai-replies') && request.method==='POST') {
+    const input=await readInput(request,64000);
+    const {status,data}=action==='ai-write'?await aiWrite(ai,mailbox,input,fetch):await aiReplies(ai,mailbox,input,fetch);
+    await admin.record(login.email,'ask-ai');
+    return reply(data,status);
    }
    if (action==='ask-ai' && request.method==='POST') {
     const {status,data}=await askEmail(ai,mailbox,await readInput(request,96000),fetch,{resilient:true});

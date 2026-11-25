@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {askEmail} from '../server/ask-ai.mjs';
+import {askEmail,resetCooldowns} from '../server/ask-ai.mjs';
 import {askAiPrompt} from '../server/ask-ai-prompt.mjs';
 import {mailboxTemperatures,temperatureConfig} from '../server/ghl-contacts.mjs';
 import {createHostedHandler} from '../netlify/functions/ionos.mjs';
@@ -15,6 +15,7 @@ const mailbox={async body(id,options) {
 test('Ask AI uses the MCP Groq reasoning model with web search first and falls back to Gemini',async ()=>{
  const config={gemini:'fake-gemini',groq:'fake-groq',askGroqModel:'openai/gpt-oss-120b',webSearch:true};
  for (const failure of ['none','http','timeout','empty']) {
+  resetCooldowns();
   const calls=[];
   const result=await askEmail(config,mailbox,question,async (url,options)=>{
    calls.push(url);
@@ -44,6 +45,7 @@ test('Ask AI uses the MCP Groq reasoning model with web search first and falls b
 });
 
 test('Groq retries 503 once before Gemini and both receive the same prompt, settings and history',async ()=>{
+ resetCooldowns();
  const requests=[];
  const history=[{role:'user',content:'What is this?'},{role:'assistant',content:'A demo bid.'}];
  const result=await askEmail({gemini:'fake',groq:'fake'},mailbox,{...question,history},async (url,options)=>{

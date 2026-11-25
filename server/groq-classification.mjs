@@ -1,5 +1,9 @@
 import {createHash} from 'node:crypto';
 import {categories,currentMessageText} from '../src/model.mjs';
+import {cloudflareJson} from './cloudflare-ai.mjs';
+
+let groqRestUntil = 0;
+export function resetGroqRest() {groqRestUntil = 0;}
 
 const model = 'openai/gpt-oss-120b';
 const deadlineMs = 8000;
@@ -47,22 +51,34 @@ function excerpt(value,limit) {
   .replace(/https?:\/\/[^\s<>]+/gi,'[link]').replace(/\s+/g,' ').trim().slice(0,limit);
 }
 
-async function classifyBatch(batch,key,signal,fetcher,output) {
+async function classifyBatch(batch,key,signal,fetcher,output,cloudflare) {
  const messages = batch.map(({subject,body},index)=>({index,subject,excerpt:body}));
- const response = await fetcher('https://api.groq.com/openai/v1/chat/completions',{
-  method:'POST',
-  headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
-  signal,
-  body:JSON.stringify({
-   model,reasoning_effort:'low',temperature:0,max_completion_tokens:2000,
-   response_format:responseFormat,
-   messages:[{role:'system',content:instructions},{role:'user',content:JSON.stringify(messages)}],
-  }),
- });
- if (!response.ok) return;
- const {choices} = await response.json();
- if (choices?.[0]?.finish_reason!=='stop') return;
- const {results} = JSON.parse(choices[0].message.content);
+ let parsed = null;
+ let groqBenched = !key || (groqRestUntil>Date.now());
+ if (!groqBenched) {
+  const response = await fetcher('https://api.groq.com/openai/v1/chat/completions',{
+   method:'POST',
+   headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
+   signal,
+   body:JSON.stringify({
+    model,reasoning_effort:'low',temperature:0,max_completion_tokens:2000,
+    response_format:responseFormat,
+    messages:[{role:'system',content:instructions},{role:'user',content:JSON.stringify(messages)}],
+   }),
+  });
+  if (response.ok) {
+   const {choices} = await response.json();
+   if (choices?.[0]?.finish_reason==='stop') parsed = JSON.parse(choices[0].message.content);
+  } else if (response.status===429) groqRestUntil = Date.now()+30000;
+ }
+ // Groq rate limited or failed: Cloudflare Workers AI sorts the same batch.
+ if (!parsed && cloudflare) {
+  parsed = await cloudflareJson(cloudflare,{system:instructions+'\nReturn {"results":[{"index":0,"category":"..."}]} using only these categories: '+[...categories,abstain].join(', ')+'.',
+   user:JSON.stringify(messages),signal}).catch(()=>null);
+ }
+ if (!parsed) return;
+
+ const results = parsed.results;
  if (!Array.isArray(results)||results.length!==batch.length) return;
  const labels = new Map();
  for (const item of results) {
@@ -81,9 +97,9 @@ async function classifyBatch(batch,key,signal,fetcher,output) {
  }
 }
 
-export async function groqCategories(mail,email,key,fetcher=fetch,{deadline=deadlineMs}={}) {
+export async function groqCategories(mail,email,key,fetcher=fetch,{deadline=deadlineMs,cloudflare=null}={}) {
  const labels = new Map();
- if (!key) return labels;
+ if (!key&&!cloudflare) return labels;
  const pending = [];
  for (const message of mail) {
   if (message.folder!=='Inbox') continue;
@@ -104,7 +120,7 @@ export async function groqCategories(mail,email,key,fetcher=fetch,{deadline=dead
  for (let start=0;start<pending.length&&!signal.aborted;start+=parallel*batchSize) {
   const offsets=Array.from({length:parallel},(_,index)=>start+index*batchSize).filter(offset=>offset<pending.length);
   await Promise.allSettled(offsets.map(offset=>classifyBatch(
-   pending.slice(offset,offset+batchSize),key,signal,fetcher,labels,
+   pending.slice(offset,offset+batchSize),key,signal,fetcher,labels,cloudflare,
   )));
  }
  return labels;

@@ -6,8 +6,8 @@ type Turn = {role:'user'|'assistant';content:string};
 type Exchange = {question:string;answer:Answer;about?:string};
 
 const suggestions = {
- email:['Summarize this email','When is it due and what is the scope?','What is missing for us to estimate it?','Draft a short reply'],
- mailbox:['What bids are due this week?','Which emails still need a reply?','Have we bid with this GC before?','Any new pricing requests today?'],
+ email:['Summarize this email','Summarize the whole thread','What is in the attachments?','What is missing for us to estimate it?','Draft a short reply'],
+ mailbox:['Catch me up on unread mail','What bids are due this week?','Which emails still need a reply?','Have we bid with this GC before?'],
 };
 
 // Plain text answers to readable blocks: paragraphs, "- " bullet lists and clickable https links. No HTML is injected.
@@ -47,11 +47,12 @@ function source(answer:Answer) {
  return model+(answer.backup?' · backup model':'');
 }
 
-export function AskAi({ask,prefill='',toolbar=false,subject}:{
+export function AskAi({ask,prefill='',toolbar=false,subject,onUseReply}:{
  ask:(question:string,history:Turn[],aboutOpenEmail:boolean)=>Promise<Answer>;
  prefill?:string;
  toolbar?:boolean;
  subject?:string;
+ onUseReply?:(text:string)=>void;
 }) {
  const button=useRef<HTMLButtonElement>(null);
  const dialog=useRef<HTMLDialogElement>(null);
@@ -131,8 +132,9 @@ export function AskAi({ask,prefill='',toolbar=false,subject}:{
      <div className={'ask-ai-answer'+(answer.excerptsOnly?' ask-ai-fallback':'')}>
       <FormattedAnswer text={answer.answer}/>
       <footer><small>{source(answer)}</small>
+       <span>{about&&onUseReply&&!answer.excerptsOnly&&<button type="button" className="ask-ai-use" onClick={()=>{onUseReply(answer.answer);dialog.current?.close();}}>Use in reply</button>}
        <button type="button" className="icon" title="Copy answer" aria-label="Copy answer" onClick={()=>void copy(index,answer.answer)}>
-        {copied===index?<Check size={14}/>:<Copy size={14}/>}</button></footer>
+        {copied===index?<Check size={14}/>:<Copy size={14}/>}</button></span></footer>
      </div>
     </div>)}
     {busy&&<div className="ask-ai-thinking" role="status"><span className="ask-ai-dots" aria-hidden="true"><i/><i/><i/></span>

@@ -256,3 +256,17 @@ Safety: the request body is built from a fixed allowlist (`type: InternalComment
 - Sorting: low reasoning effort; mail already decided by admin keywords or saved 9 AM / 3 PM labels is not sent to the model.
 - Ask AI: medium reasoning for quick lookups, high only for analysis questions (compare, risk, totals, timelines). Questions about the open email skip the mailbox-wide search. Related-mail excerpts are read over one IMAP connection, with quoted history removed.
 - Ask AI can answer about the open email or the whole mailbox (switch at the top of the dialog).
+
+## Cloudflare Workers AI backup
+
+Set the same variables the A2Z MCP uses in Netlify Production → Functions: `CLOUDFLARE_ACCOUNT_ID` (32 character account ID), `CLOUDFLARE_AI_TOKEN` (Workers AI permission) and optional `CLOUDFLARE_AI_MODEL` (default `@cf/meta/llama-3.3-70b-instruct-fp8-fast`). Order: Ask AI and writing help use Groq, then Cloudflare, then Gemini; bid scans use Gemini, then Cloudflare, then Groq; sorting and HighLevel summaries use Groq, then Cloudflare. A rate limit (HTTP 429) benches that provider for 30 seconds so the next requests go straight to the backup. Health checks include a Cloudflare test.
+
+## Starred, delivery status and send confirmation
+
+**Starred** in the sidebar shows starred mail from every IONOS folder (search qualifier `is:starred`, also `is:unread`). After sending, a confirmation card shows the recipients IONOS accepted, any rejected address, and whether the copy was saved to Sent. Sent mail shows a status: Sent (accepted by IONOS), Delivered, Partly delivered, Delayed, Bounced or Partly bounced, from delivery reports (DSN) requested on every send and from bounces. Success reports are recorded and filed into an **A2Z Delivery Reports** folder; bounces stay in Inbox. Many receiving servers never confirm delivery, so those messages stay at Sent unless they bounce.
+
+## Gemini in Gmail style features
+
+- Ask AI reads PDF and image attachments of the open email (Gemini), summarizes the whole thread, and catches you up on unread mail. Answers about an open email have **Use in reply**.
+- Compose has **Help me write** (draft from a prompt, including replies with the original email as context), Polish, Formal, Friendlier, Shorter, Elaborate, Proofread and Translate, with Undo.
+- The reader offers **Suggest replies**: three short replies that open in Compose.

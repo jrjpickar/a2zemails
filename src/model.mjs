@@ -70,6 +70,8 @@ export function searchMail(row, q) {
  const values={from:row.from+' '+row.name,to:row.to+' '+(row.cc||''),subject:row.subject,project:projects.find(p=>p.id===row.project)?.name||'',date:row.date,attachment:row.files.join(' ')};
  const all=[...Object.values(values),row.body,row.company,row.category,row.project].join(' ').toLowerCase();
  return (q.match(/(?:[^\s"]+|"[^"]*")+/g)||[]).every(term=>{
+  if (/^is:starred$/i.test(term)) return Boolean(row.star);
+  if (/^is:unread$/i.test(term)) return Boolean(row.unread);
   const m=term.match(/^(from|to|subject|project|date|attachment):(.*)$/i);
   return (m?values[m[1].toLowerCase()].toLowerCase():all).includes((m?m[2]:term).replaceAll('"','').toLowerCase());
  });

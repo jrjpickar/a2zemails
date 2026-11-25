@@ -123,3 +123,6 @@
 .ask-ai-send{display:grid;place-items:center;width:40px;height:40px;border:0;border-radius:10px;background:var(--accent,#d9f367);color:#1d1b16;cursor:pointer}
 .ask-ai-send:disabled{opacity:.45;cursor:default}
 .ask-ai-hint{display:block;padding:0 16px 12px;color:var(--muted);font-size:11px}
+.ask-ai-answer footer>span{display:inline-flex;align-items:center;gap:6px}
+.ask-ai-use{padding:4px 10px;border:1px solid var(--line);border-radius:999px;background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer}
+.ask-ai-use:hover{border-color:currentColor}

@@ -4,7 +4,7 @@ import {SearchFilters,defaultSearchFilters,type SearchFiltersValue} from './sear
 import {downloadMailCsv,mailCsvHeader,mailCsvRows} from './mail-csv.mjs';
 import React,{useEffect,useMemo,useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {LayoutDashboard,ClipboardList,FolderKanban,Calculator,FileQuestion,HardHat,Receipt,Inbox,Send,FileText,Archive,Trash2,ShieldAlert,Plus,Search,SlidersHorizontal,PanelLeft,ChevronDown,ChevronLeft,Star,Paperclip,Reply,ReplyAll,Forward,MoreHorizontal,ArrowUpRight,Mail,Clock3,X,Check,Download,RotateCcw,MailOpen,Menu,ArrowRight,Moon,Palette,Settings2,Users} from 'lucide-react';
+import {LayoutDashboard,ClipboardList,FolderKanban,Calculator,FileQuestion,HardHat,Receipt,Inbox,Send,FileText,Archive,Trash2,ShieldAlert,Plus,Search,SlidersHorizontal,PanelLeft,ChevronDown,ChevronLeft,Star,Paperclip,Reply,ReplyAll,Forward,MoreHorizontal,ArrowUpRight,Mail,Clock3,X,Check,Download,RotateCcw,MailOpen,Menu,ArrowRight,Moon,Palette,Settings2,Users,Sparkles} from 'lucide-react';
 import {categories,projects,seed,classify,matchProject,searchMail,initialState,threadFor,rowActions,appendSignature,dashboardQueues} from './model.mjs';
 import {RichMail,type MailBody} from './rich-mail';
 import {uploadLargeFile,type LargeFile} from './large-upload';
@@ -21,7 +21,9 @@ import './theme.css';
 const temperatures=[['cold','Cold'],['warm','Warm'],['hot','Hot'],['vip','VIP']] as const;
 type Temperature=typeof temperatures[number][0];
 type SearchCursor={path:string;before:number|null;generation:string|null};
-type Message={id:string;older?:boolean;temperature?:Temperature;thread:string;name:string;company:string;subject:string;date:string;body:string;sentSignatureImage?:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
+type Delivery={status:string;recipients:{address:string;action:string;status?:string;detail?:string;at?:string}[];updatedAt:string|null};
+type SendReceipt={subject:string;to:string[];accepted:string[];rejected:string[];sentSaved:boolean;live:boolean;id:string;thread:boolean};
+type Message={id:string;older?:boolean;delivery?:Delivery;temperature?:Temperature;thread:string;name:string;company:string;subject:string;date:string;body:string;sentSignatureImage?:string;needsBody?:boolean;files:string[];attachments?:MailAttachment[];due?:string;from:string;to:string;cc:string;bcc?:string;category:string;project:string;folder:string;unread:boolean;star:boolean;previousFolder?:string;headers:{messageId:string;references:string[]}};
 type Upload={name:string;data:string;size?:number};
 type StagedUpload={id:string;name:string;size:number};
 type SavedDraft={id:string;to:string;subject:string;updatedAt:string};
@@ -49,7 +51,7 @@ const demo='operations@a2z.example';
 const identities=[demo,'estimating@a2z.example'];
 const groups=[
  {label:'WORKSPACE', links:[['Command Center',LayoutDashboard],['Bid Invitations',ClipboardList],['Active Projects',FolderKanban],['Estimating',Calculator],['RFIs & Change Orders',FileQuestion],['Dispatch',HardHat],['Invoices',Receipt],['General',Mail]]},
- {label:'MAILBOX',links:[['Inbox',Inbox],['Sent',Send],['Drafts',FileText],['Archive',Archive],['Trash',Trash2],['Spam',ShieldAlert]]}
+ {label:'MAILBOX',links:[['Inbox',Inbox],['Starred',Star],['Sent',Send],['Drafts',FileText],['Archive',Archive],['Trash',Trash2],['Spam',ShieldAlert]]}
 ] as const;
 const tags:Record<string,string>={'Bid Invitations':'Bid Invitation','Estimating':'Estimating','RFIs & Change Orders':'RFI / Change Order','Dispatch':'Dispatch','Invoices':'Invoices','General':'General'};
 const tones:Record<string,string>={'Bid Invitations':'gold','Estimating':'purple','RFIs & Change Orders':'blue','Dispatch':'green','Invoices':'rose','General':'gray'};
@@ -99,6 +101,12 @@ function MessageTimestamp({value}:{value:string}) {
   {messageTime.format(date)} · {messageDate.format(date)}
  </time>;
 }
+const deliveryLabels:Record<string,[string,string]>={sent:['Sent','gray'],delivered:['Delivered','green'],'partly delivered':['Partly delivered','green'],
+ delayed:['Delayed','gold'],bounced:['Bounced','rose'],'partly bounced':['Partly bounced','rose']};
+function deliveryTitle(delivery?:Delivery) {
+ if (!delivery||!delivery.recipients.length) return 'Accepted by IONOS. Shows Delivered when the recipient server confirms. Some servers never confirm.';
+ return delivery.recipients.map(item=>(item.address||'All recipients')+': '+item.action+(item.status?' ('+item.status+')':'')+(item.detail?' '+item.detail:'')).join('\n');
+}
 const initials=(name:string)=>name.split(' ').slice(0,2).map(s=>s[0]).join('');
 const mailboxName=(email:string)=>{const words=(email.split('@')[0]||'').split(/[._\-+]+/).filter(Boolean);return words.length?words.map(word=>word[0].toUpperCase()+word.slice(1).toLowerCase()).join(' '):'A2Z user';};
 type Profile={name:string;admin:boolean};
@@ -108,6 +116,14 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const [knownContacts,setKnownContacts]=useState<Contact[]>([]);
  const [mailFeatures,setMailFeatures]=useState({askAi:false,temperatureFolders:false,temperatureUnavailable:false});
  const [profile,setProfile]=useState<Profile|null>(null);
+ const [sendReceipt,setSendReceipt]=useState<SendReceipt|null>(null);
+ const [aiWriting,setAiWriting]=useState('');
+ const [aiUndo,setAiUndo]=useState<{draft:string;body:string}|null>(null);
+ const [aiPrompt,setAiPrompt]=useState('');
+ const [aiWriteOpen,setAiWriteOpen]=useState(false);
+ const [smartReplies,setSmartReplies]=useState<{id:string;replies:string[]}|null>(null);
+ const [smartBusy,setSmartBusy]=useState(false);
+ useEffect(()=>{if(!sendReceipt||sendReceipt.rejected.length)return;const timer=window.setTimeout(()=>setSendReceipt(null),9000);return()=>window.clearTimeout(timer);},[sendReceipt]);
  const [teamOpen,setTeamOpen]=useState(false);
  const [olderCursors,setOlderCursors]=useState<Record<string,OlderCursor|null>>({});
  const [olderBusy,setOlderBusy]=useState(false);
@@ -316,7 +332,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  const temperaturePrefix='temperature:';
  const temperatureName=temperatures.find(([value])=>nav===temperaturePrefix+value)?.[1];
  const viewName=temperatureName||(nav.startsWith(customFolderPrefix)?nav.slice(customFolderPrefix.length):nav);
- const physicalFolders:string[]=[...new Set([...groups[1].links.map(([name])=>name).filter(name=>name!=='Drafts'),...mailFolders])];
+ const physicalFolders:string[]=[...new Set([...groups[1].links.map(([name])=>name).filter(name=>name!=='Drafts'&&name!=='Starred'),...mailFolders])];
  const currentSearchFolder=temperatureName?'Inbox':physicalFolders.includes(viewName)?viewName:undefined;
  const selectedSearchFolder=searchFilters.folder==='current'?currentSearchFolder:
   searchFilters.folder.startsWith('folder:')?searchFilters.folder.slice(7):undefined;
@@ -339,12 +355,28 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  function inFolder(message:Message, folder:string) {
   if (folder.startsWith(temperaturePrefix)) return message.folder==='Inbox'&&message.temperature===folder.slice(temperaturePrefix.length);
   if (folder.startsWith(customFolderPrefix)) return message.folder===folder.slice(customFolderPrefix.length);
+  if (folder==='Starred') return message.star&&!['Trash','Spam'].includes(message.folder);
   if (folder==='Active Projects') return Boolean(message.project)&&message.category!=='Bid Invitations'&&!['Trash','Spam'].includes(message.folder);
   if (categories.includes(folder)) return message.category===folder&&!['Trash','Spam'].includes(message.folder);
   return message.folder===folder;
  }
  async function askAboutMail(id:string|undefined,question:string,history:object[]) {
-  if (liveToken) return liveRequest('ask-ai',{id,question,history});
+  if (liveToken) {
+   // Like Gemini in Gmail: read attachments, the whole thread, or unread mail when the question asks for it.
+   const extra:Record<string,unknown>={};
+   const open=id?mail.find(item=>item.id===id):undefined;
+   const meta=(items:Message[])=>Object.fromEntries(items.map(item=>[item.id,{subject:item.subject,from:item.from,to:item.to,date:item.date,folder:item.folder}]));
+   if (open?.attachments?.length&&/\b(attach\w*|pdfs?|plans?|drawings?|documents?|files?|specs?|scope sheet|bid form)\b/i.test(question)) extra.includeAttachments=true;
+   if (open&&/\b(thread|conversation|back and forth|history|all (?:the )?(?:emails|messages|replies))\b/i.test(question)) {
+    const thread=(threadFor(mail,open) as Message[]).filter(item=>item.id!==open.id&&!item.id.startsWith('out-')).slice(-8);
+    if (thread.length) Object.assign(extra,{contextIds:thread.map(item=>item.id),contextMeta:meta(thread),contextKind:'thread'});
+   }
+   if (!id&&/\b(catch me up|unread|what did i miss|new (?:mail|emails|messages))\b/i.test(question)) {
+    const unread=mail.filter(item=>item.folder==='Inbox'&&item.unread).slice(0,15);
+    if (unread.length) Object.assign(extra,{contextIds:unread.map(item=>item.id),contextMeta:meta(unread),contextKind:'unread'});
+   }
+   return liveRequest('ask-ai',{id,question,history,...extra});
+  }
   const chosen=mail.find(item=>item.id===id)||mail.find(item=>searchMail(item,question));
   return {answer:chosen?chosen.subject+'\n\n'+chosen.body:'Select a sample email to see sandbox excerpts.',
    provider:'Sandbox' as const,excerptsOnly:true};
@@ -367,7 +399,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   for (const item of localList) unique.set(item.id,item);
   return [...unique.values()].sort((a,b)=>b.date.localeCompare(a.date));
  },[localList,activeSearch,searchKey,mailSearch]);
- const olderFolder=liveToken&&!activeSearch&&nav!=='Drafts'&&nav!=='Command Center'?(currentSearchFolder||'Inbox'):'';
+ const olderFolder=liveToken&&!activeSearch&&nav!=='Drafts'&&nav!=='Command Center'&&nav!=='Starred'?(currentSearchFolder||'Inbox'):'';
  const olderCursor=useMemo(()=>{
   if (!olderFolder) return null;
   if (Object.hasOwn(olderCursors,olderFolder)) return olderCursors[olderFolder];
@@ -381,6 +413,28 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   }
   return oldest;
  },[olderFolder,olderCursors,mail]);
+ // Starred pulls flagged mail from every IONOS folder, not only the recent window.
+ const starredLoad=React.useRef<Promise<void>|null>(null);
+ function loadStarred() {
+  if (!liveToken||starredLoad.current) return;
+  starredLoad.current=(async()=>{
+   let positions:SearchCursor[]|undefined;
+   try {
+    for (let page=0;page<8;page++) {
+     const data:{mail:Message[];next:SearchCursor[]}=await liveRequest('mail-search',{query:'is:starred',positions});
+     const rows=data.mail.map(message=>({...message,older:true}));
+     setState(previous=>{
+      const known=new Set(previous.mail.map(message=>message.id));
+      return {...previous,mail:[...previous.mail,...rows.filter(message=>!known.has(message.id))]};
+     });
+     positions=data.next;
+     if (!positions.length) break;
+    }
+   } catch(error) {setToast(error instanceof Error?error.message:'Could not load starred mail.');}
+   finally {window.setTimeout(()=>{starredLoad.current=null;},60000);}
+  })();
+ }
+ useEffect(()=>{if(nav==='Starred')loadStarred();},[nav]);
  async function loadOlder() {
   if (!olderFolder||!olderCursor||olderBusy) return;
   const folder=olderFolder;
@@ -490,7 +544,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     const chosen=folders.filter(item=>{
      if (activeSearch&&!dashboard) return !scope.folder||item.folder===scope.folder;
      if (dashboard||temperatureName) return item.folder==='Inbox';
-     if (nav==='Active Projects'||categories.includes(nav)) return true;
+     if (nav==='Active Projects'||nav==='Starred'||categories.includes(nav)) return true;
      return item.folder===viewName;
     });
     const currentById=new Map(mail.map(item=>[item.id,item]));
@@ -614,7 +668,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    }
   });
  }
- function start(mode='new',m?:Message){
+ function start(mode='new',m?:Message,prefill?:string){
   if(compose||(liveToken&&!account))return;
   if (mode==='Forward' && m?.needsBody) {
    const result=bodies[m.id];
@@ -629,10 +683,31 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    }
    m={...m,body:result.body};
   }
-  const d:Draft={id:crypto.randomUUID(),to:m&&mode!=='Forward'?m.from:'',cc:mode==='Reply all'&&m?[m.to,m.cc].join(', ').split(',').map(s=>s.trim()).filter(s=>s&&!senderIdentities.includes(s)&&s!==m.from).join(', '):'',subject:m?(mode==='Forward'?'Fwd: ':'Re: ')+m.subject.replace(/^(Re: |Fwd: )+/i,''):'',body:mode==='Forward'&&m?'\n\n---------- Forwarded message ----------\nFrom: '+m.from+'\nSubject: '+m.subject+'\n\n'+m.body:'',files:!liveToken&&mode==='Forward'&&m?[...m.files]:[],forwardedAttachments:liveToken&&mode==='Forward'&&m?m.attachments?.map(file=>({messageId:m.id,part:file.part,name:file.name})):undefined,thread:mode==='Forward'?undefined:m?.thread,parent:mode==='Forward'||!m?undefined:{headers:m.headers,project:m.project},identity:account||demo,includeSignature:true};
+  const d:Draft={id:crypto.randomUUID(),to:m&&mode!=='Forward'?m.from:'',cc:mode==='Reply all'&&m?[m.to,m.cc].join(', ').split(',').map(s=>s.trim()).filter(s=>s&&!senderIdentities.includes(s)&&s!==m.from).join(', '):'',subject:m?(mode==='Forward'?'Fwd: ':'Re: ')+m.subject.replace(/^(Re: |Fwd: )+/i,''):'',body:prefill!==undefined?prefill:mode==='Forward'&&m?'\n\n---------- Forwarded message ----------\nFrom: '+m.from+'\nSubject: '+m.subject+'\n\n'+m.body:'',files:!liveToken&&mode==='Forward'&&m?[...m.files]:[],forwardedAttachments:liveToken&&mode==='Forward'&&m?m.attachments?.map(file=>({messageId:m.id,part:file.part,name:file.name})):undefined,thread:mode==='Forward'?undefined:m?.thread,parent:mode==='Forward'||!m?undefined:{headers:m.headers,project:m.project},identity:account||demo,includeSignature:true};
   setDraftSaveState('');
   setDraggingFiles(false);
   setState(s=>({...s,drafts:[...s.drafts,d]}));setCompose(d.id);setMenu('');
+ }
+ // Gemini-in-Gmail style writing help in Compose: Help me write, refine, proofread and translate, with undo.
+ async function aiWrite(mode:string,instruction='') {
+  if (!draft||aiWriting) return;
+  setAiWriting(mode);
+  try {
+   const replyTo=draft.parent?mail.find(item=>item.headers.messageId===draft.parent?.headers.messageId&&!item.id.startsWith('out-'))?.id:undefined;
+   const data:{body:string}=await liveRequest('ai-write',{mode,instruction,subject:draft.subject,body:draft.body.split('\n\n---------- Forwarded message')[0],replyToId:replyTo});
+   const forwarded=draft.body.includes('\n\n---------- Forwarded message')?draft.body.slice(draft.body.indexOf('\n\n---------- Forwarded message')):'';
+   setAiUndo({draft:draft.id,body:draft.body});
+   edit({body:data.body+forwarded});
+   if (mode==='write') {setAiPrompt('');setAiWriteOpen(false);}
+  } catch(error) {setToast(error instanceof Error?error.message:'AI writing is unavailable.');}
+  finally {setAiWriting('');}
+ }
+ async function suggestReplies(message:Message) {
+  if (smartBusy) return;
+  setSmartBusy(true);
+  try {setSmartReplies({id:message.id,...await liveRequest('ai-replies',{id:message.id})});}
+  catch(error) {setToast(error instanceof Error?error.message:'Suggested replies are unavailable.');}
+  finally {setSmartBusy(false);}
  }
  function edit(patch:Partial<Draft>, fromUpload=false){if (!fromUpload&&(writing.current||sendingRef.current)) return;setState(s=>({...s,drafts:s.drafts.map(d=>d.id===compose?{...d,...patch}:d)}))}
  async function performSave(task:()=>Promise<void>) {
@@ -812,6 +887,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   let messageId='<'+id+'@a2z.example>';
   let rejected: string[] = [];
   let sentSaved=true;
+  let accepted:string[]=[];
   let draftCleanupFailed=false;
   if(liveToken){
    sendingRef.current=true;
@@ -821,6 +897,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
     const result=await liveRequest('send',{to:draft.to,cc:draft.cc,bcc:draft.bcc,subject:draft.subject,body,references,id,attachments:draft.attachments,stagedAttachments:draft.stagedAttachments,forwardedAttachments:draft.forwardedAttachments,largeFiles:draft.largeFiles,signatureImage:sentSignatureImage,savedDraft:hosted});
     messageId=result.messageId;
     rejected=result.rejected;
+    accepted=result.accepted||[];
     sentSaved=result.sentSaved;
     draftCleanupFailed=result.draftCleanupFailed===true;
    } catch(error){
@@ -837,7 +914,9 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    ++prefsVersion.current;
    setSavedDrafts(previous=>previous.filter(item=>item.id!==draft.id));
   }
-  setState(s=>({...s,mail:[m,...s.mail],drafts:s.drafts.filter(d=>d.id!==draft.id)}));setCompose(null);setToast(draftCleanupFailed?'Message sent. Remove the saved draft manually.':rejected.length?'IONOS rejected: '+rejected.join(', '):liveToken?(sentSaved?'Message accepted by IONOS':'Message sent. IONOS could not save a copy to Sent.'):'Message sent in sandbox');
+  setState(s=>({...s,mail:[m,...s.mail],drafts:s.drafts.filter(d=>d.id!==draft.id)}));setCompose(null);
+  if (draftCleanupFailed) setToast('Message sent. Remove the saved draft manually.');
+  setSendReceipt({subject:draft.subject,to:recipients,accepted:liveToken?accepted:recipients,rejected,sentSaved:liveToken?sentSaved:true,live:Boolean(liveToken),id,thread:Boolean(draft.thread)});
   if(!draft.thread){go('Sent');setSelected(id);setMobileRead(true)}
   // Swap the local copy for the IONOS Sent copy so its attachments can be opened.
   if (liveToken&&sentSaved) window.setTimeout(()=>{void (refreshing.current||Promise.resolve()).then(()=>refreshMailbox());},2500);
@@ -955,7 +1034,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <div className="sidebar-end"><div className="env"><i/> {liveToken ? connection : 'Sandbox workspace'}</div><div className="profile"><div className="profile-avatar">{initials(userName).toUpperCase()}</div><div><b title={account||undefined}>{userName}</b><small>{profile?.admin?'Senior admin':'A2Z Construction'}</small></div>{profile?.admin&&hosted&&<button title="Admin console" aria-label="Admin console" onClick={()=>setTeamOpen(true)}><Users size={17}/></button>}<button title="Keyboard shortcuts" onClick={()=>setHelp(true)}><MoreHorizontal size={17}/></button></div></div>
  </aside>
  <main>
- <header className={'topbar'+((mailFeatures.askAi||!liveToken)?' topbar-with-ai':'')}><button className="icon nav-toggle" aria-label="Toggle navigation" onClick={()=>setSide(!side)}><Menu size={20}/></button><div className="crumb"><PanelLeft size={16}/> <span>Workspace</span><span className="slash">/</span><b>{query?'Search':viewName}</b></div>{(mailFeatures.askAi||!liveToken)&&<AskAi toolbar prefill={query} subject={currentRow?.subject}
+ <header className={'topbar'+((mailFeatures.askAi||!liveToken)?' topbar-with-ai':'')}><button className="icon nav-toggle" aria-label="Toggle navigation" onClick={()=>setSide(!side)}><Menu size={20}/></button><div className="crumb"><PanelLeft size={16}/> <span>Workspace</span><span className="slash">/</span><b>{query?'Search':viewName}</b></div>{(mailFeatures.askAi||!liveToken)&&<AskAi toolbar prefill={query} subject={currentRow?.subject} onUseReply={currentRow&&!currentRow.id.startsWith('out-')?text=>start('Reply',currentRow,text):undefined}
   ask={(question,history,aboutOpenEmail)=>askAboutMail(aboutOpenEmail?currentRow?.id:undefined,question,history)}/>}<div className="search">
   <button className="icon search-filter-trigger" type="button" title="Search filters" aria-label="Search filters"
    aria-expanded={menu==='search-filters'} onClick={()=>setMenu(menu==='search-filters'?'':'search-filters')}><SlidersHorizontal size={17}/></button>
@@ -1008,7 +1087,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <div className="rows">
  {nav==='Drafts'&&!query?draftList.length?draftList.map(d=><button className="draft-row" key={d.id} disabled={saving} onClick={()=>reopenDraft(d.id)}><span className="tag rose">Draft</span><b>{d.subject||'(No subject)'}</b><span>{d.to||'No recipient'}</span></button>):<div className="empty">{draftSyncError||'No drafts yet.'}{draftSyncError&&<button className="project-tag" onClick={()=>void syncPreferences()}>Retry</button>}</div>:list.length?list.slice(0,limit).map((m,i)=><div key={m.id} className={'mail-row '+(m.id===currentRow?.id?'selected ':'')+(m.unread?'unread':'')}>
  <div className="row-side"><input type="checkbox" disabled={!!liveToken} aria-label={'Select '+m.subject} checked={marked.includes(m.id)} onChange={e=>setMarked(e.target.checked?[...marked,m.id]:marked.filter(x=>x!==m.id))}/><button className={'star '+(m.star?'starred':'')} disabled={!!liveToken&&m.id.startsWith('out-')} title={m.star?'Remove star':'Star message'} onClick={()=>change([m.id],{star:!m.star})}><Star size={14}/></button></div>
- <button className="row-content" onClick={()=>open(m)}><div className="row-top"><span className={'avatar mini '+avatarColors[i%5]}>{initials(m.name)}</span><b>{m.folder==='Sent'?'To: '+m.to:m.name}</b><MessageTimestamp value={m.date}/></div><strong>{m.subject}</strong><p>{m.body.replace(/\s+/g,' ')}</p><div className="row-foot">{tag(m)}{m.folder!=='Inbox'&&<span className="tag gray">{m.folder}</span>}{m.files.length>0&&<span className="paper-count"><Paperclip size={13}/>{m.files.length}</span>}{m.unread&&<i className="unread-dot"/>}</div></button>
+ <button className="row-content" onClick={()=>open(m)}><div className="row-top"><span className={'avatar mini '+avatarColors[i%5]}>{initials(m.name)}</span><b>{m.folder==='Sent'?'To: '+m.to:m.name}</b><MessageTimestamp value={m.date}/></div><strong>{m.subject}</strong><p>{m.body.replace(/\s+/g,' ')}</p><div className="row-foot">{tag(m)}{m.folder!=='Inbox'&&(m.folder==='Sent'&&liveToken?<span className={'tag delivery '+(deliveryLabels[m.delivery?.status||'sent']||deliveryLabels.sent)[1]} title={deliveryTitle(m.delivery)}>{(deliveryLabels[m.delivery?.status||'sent']||deliveryLabels.sent)[0]}</span>:<span className="tag gray">{m.folder}</span>)}{m.files.length>0&&<span className="paper-count"><Paperclip size={13}/>{m.files.length}</span>}{m.unread&&<i className="unread-dot"/>}</div></button>
  {(!liveToken||!m.id.startsWith('out-'))&&<div className="row-mail-actions">
   <button type="button" className="icon" title={m.unread?'Mark as read':'Mark as unread'}
    aria-label={(m.unread?'Mark as read: ':'Mark as unread: ')+m.subject}
@@ -1032,12 +1111,16 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <footer className="list-footer">{nav==='Drafts'&&!query?draftList.length+' drafts':list.length+' messages'} <span>•</span> {liveToken?connection:'Local sandbox'}</footer>
  </section>
  <section className="reader">{currentRow?<><div className="reader-tools"><button className="icon back" title="Back to messages" onClick={()=>setMobileRead(false)}><ChevronLeft size={19}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Archive" onClick={()=>move([currentRow.id],'Archive')}><Archive size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.folder==='Trash'?'Delete forever':'Move to Trash'} onClick={()=>currentRow.folder==='Trash'?setDeleteTarget(currentRow):void move([currentRow.id],'Trash')}><Trash2 size={18}/></button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title={currentRow.unread?'Mark read':'Mark unread'} onClick={()=>change([currentRow.id],{unread:!currentRow.unread})}>{currentRow.unread?<MailOpen size={18}/>:<Mail size={18}/>}</button><button className="icon" disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Move message" onClick={()=>setMenu(menu==='move'?'':'move')}><MoreHorizontal size={20}/></button>{currentRow.folder!=='Inbox'&&currentRow.folder!=='Sent'&&<button className="icon" title="Restore message" onClick={()=>move([currentRow.id],currentRow.previousFolder==='Sent'?'Sent':'Inbox')}><RotateCcw size={17}/></button>}{menu==='move'&&<div className="popover move">{['Inbox','Sent','Archive','Trash','Spam'].filter(f=>f!==currentRow.folder).map(f=><button key={f} onClick={()=>move([currentRow.id],f)}>Move to {f}</button>)}</div>}<span className="tool-space"/><span className="position">{list.findIndex(m=>m.id===currentRow.id)+1} of {list.length}</span><button className="icon next" title="Previous message" disabled={list[0]===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)-1];if(p)open(p)}}><ChevronLeft size={18}/></button><button className="icon next next-right" title="Next message" disabled={list.at(-1)===currentRow} onClick={()=>{const p=list[list.indexOf(currentRow)+1];if(p)open(p)}}><ChevronLeft size={18}/></button></div>
- <div className="reader-scroll"><div className="reader-content"><div className="subject-line"><h2>{currentRow.subject}</h2><button className={'star '+(currentRow.star?'starred':'')} disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Toggle message star" onClick={()=>change([currentRow.id],{star:!currentRow.star})}><Star size={20}/></button></div><div className="reader-tags">{tag(currentRow)}{project&&<button className="project-tag" onClick={()=>{go('Active Projects');setProjectFilter(project.id)}}><FolderKanban size={13}/>{project.name}</button>}</div>
+ <div className="reader-scroll"><div className="reader-content"><div className="subject-line"><h2>{currentRow.subject}</h2><button className={'star '+(currentRow.star?'starred':'')} disabled={!!liveToken&&currentRow.id.startsWith('out-')} title="Toggle message star" onClick={()=>change([currentRow.id],{star:!currentRow.star})}><Star size={20}/></button></div><div className="reader-tags">{tag(currentRow)}{currentRow.folder==='Sent'&&liveToken&&<span className={'tag delivery '+(deliveryLabels[currentRow.delivery?.status||'sent']||deliveryLabels.sent)[1]} title={deliveryTitle(currentRow.delivery)}>{(deliveryLabels[currentRow.delivery?.status||'sent']||deliveryLabels.sent)[0]}{currentRow.delivery?.recipients.some(item=>item.action==='failed')&&': '+currentRow.delivery.recipients.filter(item=>item.action==='failed').map(item=>item.address||'see bounce in Inbox').join(', ')}</span>}{project&&<button className="project-tag" onClick={()=>{go('Active Projects');setProjectFilter(project.id)}}><FolderKanban size={13}/>{project.name}</button>}</div>
  <div className="sender"><span className="avatar sand">{initials(currentRow.name)}</span><div><b>{currentRow.name}</b><span className="from"> &lt;{currentRow.from}&gt;</span><small>To: {currentRow.to}{currentRow.cc&&' · Cc: '+currentRow.cc}{currentRow.folder==='Sent'&&currentRow.bcc&&' · Bcc: '+currentRow.bcc}</small></div><MessageTimestamp value={currentRow.date}/></div>
    {renderAttachments([currentRow,...newest.slice().reverse()])}
  {currentRow.due&&<div className="deadline"><div className="deadline-icon"><Clock3 size={19}/></div><div><b>Bid submission deadline</b><span>{day(currentRow.due+'T12:00:00')}</span></div><span className="tag gold">Open bid</span></div>}
  {renderBody(currentRow)}
  <div className="reply-actions desktop-replies">{replyButtons(currentRow)}</div>
+ {liveToken&&mailFeatures.askAi&&!currentRow.id.startsWith('out-')&&currentRow.folder!=='Sent'&&<div className="smart-replies">
+  {smartReplies?.id===currentRow.id?smartReplies.replies.map((text,index)=><button type="button" key={index} title={text} onClick={()=>start('Reply',currentRow,text)}>{text}</button>)
+   :<button type="button" className="smart-replies-get" disabled={smartBusy} onClick={()=>void suggestReplies(currentRow)}><Sparkles size={13}/> {smartBusy?'Thinking…':'Suggest replies'}</button>}
+ </div>}
  {newest.length>0&&<section className="thread"><h3>Conversation · {related.length} messages</h3>{newest.map(m=><details key={m.id} onToggle={e=>{if(e.currentTarget.open&&m.needsBody&&!bodies[m.id])void loadBody(m).catch(()=>{})}}><summary>{m.name} · <MessageTimestamp value={m.date}/></summary>{renderBody(m)}</details>)}</section>}
  <div className="metadata" hidden={!!liveToken}><label>Project<select value={currentRow.project} onChange={e=>{change([currentRow.id],{project:e.target.value});setToast('Project assignment saved')}}><option value="">Unassigned</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><label>Category<select value={currentRow.category} onChange={e=>{change([currentRow.id],{category:e.target.value});setToast('Category corrected')}}>{categories.map(c=><option key={c}>{c}</option>)}</select></label><button onClick={()=>{const domain=currentRow.from.split('@')[1];setState(s=>({...s,rules:{...s.rules,[domain]:currentRow.category}}));setToast('Rule saved for future messages from '+domain)}}>Remember sender domain rule</button></div>
  </div></div><nav className="mobile-dock mobile-replies" aria-label="Message actions">{replyButtons(currentRow)}</nav></>:<div className="reader-empty"><Inbox size={29}/><h2>Select a message</h2><p>Open a conversation to read it here.</p></div>}</section>
@@ -1061,7 +1144,19 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   const form=event.currentTarget;
   // Defer one tick so a recipient typed into To/Cc is committed before sending.
   window.setTimeout(()=>form.requestSubmit(),0);
- }}><header className="compose-titlebar" onPointerDown={composeWindow.begin} onPointerMove={composeWindow.move} onPointerUp={composeWindow.end} onLostPointerCapture={composeWindow.end} onDoubleClick={event=>{if(!(event.target as HTMLElement).closest("button"))composeWindow.reset()}}><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending||saving} onClick={closeDraft}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts} lookup={contactLookup?lookupContacts:undefined}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><RecipientInput label="Bcc" value={draft.bcc||''} onChange={bcc=>edit({bcc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label><textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}{draft.includeSignature!==false&&state.signatureImages?.[draft.identity]&&<img className="signature-logo" alt="Signature" src={state.signatureImages[draft.identity]}/>}</div><button type="button" className="project-tag" disabled={sending||saving} onClick={openSignatures}>Edit signature</button></div>
+ }}><header className="compose-titlebar" onPointerDown={composeWindow.begin} onPointerMove={composeWindow.move} onPointerUp={composeWindow.end} onLostPointerCapture={composeWindow.end} onDoubleClick={event=>{if(!(event.target as HTMLElement).closest("button"))composeWindow.reset()}}><b>New message</b><button type="button" className="icon" title="Save and close draft" disabled={sending||saving} onClick={closeDraft}><X size={19}/></button></header><label>From<select value={draft.identity} onChange={e=>edit({identity:e.target.value})}>{senderIdentities.map(i=><option key={i}>{i}</option>)}</select></label><RecipientInput label="To" autoFocus value={draft.to} onChange={to=>edit({to})} contacts={contacts} lookup={contactLookup?lookupContacts:undefined}/><RecipientInput label="Cc" value={draft.cc} onChange={cc=>edit({cc})} contacts={contacts}/><RecipientInput label="Bcc" value={draft.bcc||''} onChange={bcc=>edit({bcc})} contacts={contacts}/><label>Subject<input value={draft.subject} onChange={e=>edit({subject:e.target.value})}/></label>{liveToken&&mailFeatures.askAi&&<div className="ai-write-bar">
+  <button type="button" className={'ai-write-main'+(aiWriteOpen?' on':'')} disabled={!!aiWriting||sending} onClick={()=>setAiWriteOpen(!aiWriteOpen)}><Sparkles size={14}/> Help me write</button>
+  {draft.body.trim()&&[['polish','Polish'],['formalize','Formal'],['casual','Friendlier'],['shorten','Shorter'],['elaborate','Elaborate'],['proofread','Proofread']].map(([mode,label])=>
+   <button type="button" key={mode} disabled={!!aiWriting||sending} onClick={()=>void aiWrite(mode)}>{aiWriting===mode?'Working…':label}</button>)}
+  {draft.body.trim()&&<button type="button" disabled={!!aiWriting||sending} onClick={()=>{setAiWriteOpen(true);setAiPrompt('Translate to Spanish');}}>Translate</button>}
+  {aiUndo?.draft===draft.id&&<button type="button" className="ai-write-undo" disabled={!!aiWriting} onClick={()=>{edit({body:aiUndo.body});setAiUndo(null);}}><RotateCcw size={13}/> Undo</button>}
+  {aiWriteOpen&&<div className="ai-write-prompt">
+   <input value={aiPrompt} maxLength={1000} autoFocus placeholder={draft.parent?'e.g. Confirm we will bid, ask for the plans link':'e.g. Ask Terri for the walk date and plans, friendly tone'}
+    onChange={event=>setAiPrompt(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!(event.metaKey||event.ctrlKey)){event.preventDefault();event.stopPropagation();
+     const translate=aiPrompt.match(/^translate(?: (?:it|this))? (?:to|into) (.+)$/i);void aiWrite(translate?'translate':'write',translate?translate[1]:aiPrompt);}}}/>
+   <button type="button" className="send" disabled={!aiPrompt.trim()||!!aiWriting} onClick={()=>{const translate=aiPrompt.match(/^translate(?: (?:it|this))? (?:to|into) (.+)$/i);void aiWrite(translate?'translate':'write',translate?translate[1]:aiPrompt);}}>{aiWriting==='write'||aiWriting==='translate'?'Writing…':'Create'}</button>
+  </div>}
+ </div>}<textarea aria-label="Message body" placeholder="Write your message…" value={draft.body} onChange={e=>edit({body:e.target.value})}/><div className="signature"><label><input type="checkbox" checked={draft.includeSignature!==false} onChange={e=>edit({includeSignature:e.target.checked})}/> Include signature</label><div>{draftSignature(draft)}{draft.includeSignature!==false&&state.signatureImages?.[draft.identity]&&<img className="signature-logo" alt="Signature" src={state.signatureImages[draft.identity]}/>}</div><button type="button" className="project-tag" disabled={sending||saving} onClick={openSignatures}>Edit signature</button></div>
  {draft.files.length>0||draft.largeFiles?.length||draft.forwardedAttachments?.length||draft.stagedAttachments?.length||draft.attachments?.length?
   <div className="chips draft-attachment-list" aria-label="Draft attachments">
    {draft.files.map((name,index)=>renderDraftFile('sample:'+index,name,()=>setPreview(name),()=>edit({files:draft.files.filter((_,i)=>i!==index)})))}
@@ -1117,6 +1212,19 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  </div>}
  {livePreview&&<AttachmentPreview source={livePreview} request={liveRequest} close={()=>setLivePreview(null)}/>}
  {preview&&<div className="modal-back centered" onClick={()=>setPreview(null)}><section className="attachment-preview" role="dialog" aria-label="Attachment preview" onClick={e=>e.stopPropagation()}><header><b>{preview}</b><button className="icon" title="Close preview" onClick={()=>setPreview(null)}><X size={19}/></button></header><div className="preview-sheet"><div className="eyebrow">A2Z CONSTRUCTION SERVICES / DEMO DOCUMENT</div><FileText size={42}/><h2>{preview.replace(/\.pdf$/i,'')}</h2><p>This is a simulated attachment for the sandbox.</p></div><footer><a href="/samples/demo.pdf" download={preview}><Download size={16}/> Download sample PDF</a></footer></section></div>}
+ {sendReceipt&&<section className={'send-receipt'+(sendReceipt.rejected.length?' warn':'')} role="status" aria-live="polite">
+  <header><span className="send-receipt-icon">{sendReceipt.rejected.length?<X size={16}/>:<Check size={16}/>}</span>
+   <b>{sendReceipt.rejected.length?'Sent with problems':'Email sent'}</b>
+   <button type="button" className="icon" aria-label="Close" onClick={()=>setSendReceipt(null)}><X size={16}/></button></header>
+  <p className="send-receipt-subject">{sendReceipt.subject}</p>
+  <ul>
+   <li><Check size={13}/> {sendReceipt.live?'Accepted by IONOS for '+(sendReceipt.accepted.length||sendReceipt.to.length)+' recipient'+((sendReceipt.accepted.length||sendReceipt.to.length)===1?'':'s'):'Sent in sandbox'}: {(sendReceipt.accepted.length?sendReceipt.accepted:sendReceipt.to).join(', ')}</li>
+   {sendReceipt.rejected.length>0&&<li className="bad"><X size={13}/> Rejected: {sendReceipt.rejected.join(', ')}</li>}
+   {sendReceipt.live&&<li className={sendReceipt.sentSaved?'':'bad'}>{sendReceipt.sentSaved?<Check size={13}/>:<X size={13}/>} {sendReceipt.sentSaved?'Saved to Sent':'Could not save a copy to Sent'}</li>}
+   {sendReceipt.live&&<li className="muted">Delivery status shows on the message in Sent: Delivered, Delayed or Bounced.</li>}
+  </ul>
+  {sendReceipt.thread&&<button type="button" className="project-tag" onClick={()=>{go('Sent');setSendReceipt(null);}}>View in Sent</button>}
+ </section>}
  {teamOpen&&liveToken&&<AdminConsole self={account} request={(path,body)=>liveRequest(path,body)} onClose={()=>setTeamOpen(false)}
   onChanged={()=>void liveRequest('profile').then((data:{profile?:Profile})=>{if(data.profile)setProfile(data.profile)}).catch(()=>{})}/>}
  {help&&<div className="modal-back centered" onClick={()=>setHelp(false)}><section className="shortcuts" role="dialog" aria-label="Keyboard shortcuts" onClick={e=>e.stopPropagation()}><header><b>Keyboard shortcuts</b><button className="icon" title="Close shortcuts" onClick={()=>setHelp(false)}><X size={19}/></button></header>{[['C','Compose'],['/','Search'],['⌘R','Reply'],['⌘⇧R','Refresh mailbox'],['⌘F','Forward'],['⌘/Ctrl+Enter','Send open draft'],['E','Archive selected message'],['Esc','Close dialog or message'],['?','Show shortcuts']].map(([k,l])=><p key={k}><kbd>{k}</kbd> {l}</p>)}</section></div>}

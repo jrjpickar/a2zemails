@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createIonosMailbox, ionosConfig } from '../server/ionos.mjs';
-import { groqCategories } from '../server/groq-classification.mjs';
+import { groqCategories, resetGroqRest } from '../server/groq-classification.mjs';
 import { appendSignature, dashboardQueues, seed } from '../src/model.mjs';
 
 const env = {
@@ -106,6 +106,7 @@ test('Groq batches fall back on uncertainty, failures and ambiguous output',asyn
  const key='fixture-only';
  assert.equal((await groqCategories(mail,email,undefined,()=>assert.fail('Groq is disabled'))).size,0);
  assert.equal((await groqCategories(mail,email,key,async()=>new Response(null,{status:429}))).size,0);
+ resetGroqRest(); // a 429 benches Groq for 30 s; clear it for the next cases
  assert.equal((await groqCategories(mail,email,key,async()=>groqReply([
   {index:0,category:'Invoices'},{index:0,category:'Estimating'},
  ]))).size,0);

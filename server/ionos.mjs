@@ -6,6 +6,7 @@ import { safeRasterType,signatureImage } from './signature-image.mjs';
 import { MAX_STAGED_BYTES } from './staged-attachments.mjs';
 import { mailAttachments } from './mail-attachments.mjs';
 import { groqCategories } from './groq-classification.mjs';
+import { cloudflareConfig } from './cloudflare-ai.mjs';
 import { classify as classifyBase, keywordCategory } from '../src/model.mjs';
 
 // The project list in src/model.mjs is sandbox sample data (Harbor Point, Westfield, Riverside, Civic Center).
@@ -42,6 +43,7 @@ export function ionosConfig(env) {
  return {
   email,
   groqKey:env.GROQ_API_KEY?.trim(),
+  cloudflare:cloudflareConfig(env),
   imap:{host:env.IONOS_IMAP_HOST||'imap.ionos.com',port:Number(env.IONOS_IMAP_PORT||993),secure:true,auth,logger:false,connectionTimeout:12000,greetingTimeout:12000,socketTimeout:30000},
   smtp:{host:env.IONOS_SMTP_HOST||'smtp.ionos.com',port:smtpPort,secure:smtpPort===465,requireTLS:smtpPort===587,auth,connectionTimeout:12000,greetingTimeout:12000,socketTimeout:30000},
  };
@@ -85,10 +87,15 @@ function searchCriteria(query,scope={}) {
  const criteria=[];
  const attachments=[];
  for (const term of terms) {
-  const match=term.match(/^(from|to|subject|project|date|attachment):(.*)$/i);
+  const match=term.match(/^(from|to|subject|project|date|attachment|is):(.*)$/i);
   const field=match?.[1].toLowerCase();
   const value=(match?.[2]??term).replaceAll('"','');
   if (!value) continue;
+  if (field==='is') {
+   const flag={starred:{flagged:true},unread:{seen:false},read:{seen:true}}[value.toLowerCase()];
+   if (flag) criteria.push(flag);
+   continue;
+  }
   if (field==='attachment') {attachments.push(value.toLowerCase());continue;}
   if (field==='date'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))) {
    criteria.push({on:new Date(value+'T12:00:00Z')});continue;
@@ -150,6 +157,28 @@ export function decodePreview(part, raw) {
    .replace(/&(nbsp|amp|lt|gt|quot|apos|#39);/gi,(_,name)=>htmlEntities[name.toLowerCase()]);
  }
  return text.replace(/\s+/g,' ').trim();
+}
+
+// Delivery reports (DSNs) and bounces for mail sent from this app. The app's Message-ID and DSN envelope ID
+// both carry the out-<uuid> send ID, so a report maps back to the sent message.
+const sendId = /out-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+export function deliveryReport(raw, {from='',subject=''}={}) {
+ const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw||'');
+ const isReport = /report-type="?delivery-status/i.test(text);
+ const isBounce = /mailer-daemon|postmaster/i.test(from) && /undeliver|delivery (?:status|failure)|failure notice|returned mail|could not be delivered|delivery has failed/i.test(subject);
+ if (!isReport && !isBounce) return null;
+ const id = text.match(/Original-Envelope-Id:\s*(out-[0-9a-f-]{36})/i)?.[1] || text.match(sendId)?.[0];
+ if (!id) return null;
+ const recipients = [];
+ for (const block of text.split(/\r?\n\r?\n/)) {
+  const address = block.match(/^Final-Recipient:\s*rfc822;\s*<?([^\s>]+)>?/im)?.[1]?.toLowerCase();
+  const action = block.match(/^Action:\s*(failed|delayed|delivered|relayed|expanded)/im)?.[1]?.toLowerCase();
+  if (!address || !action) continue;
+  recipients.push({address,action,status:block.match(/^Status:\s*([245]\.\d+\.\d+)/im)?.[1]||'',
+   detail:(block.match(/^Diagnostic-Code:\s*(.+(?:\r?\n[ \t].+)*)/im)?.[1]||'').replace(/\s+/g,' ').slice(0,240)});
+ }
+ if (!recipients.length && isBounce) recipients.push({address:'',action:'failed',status:'',detail:subject.slice(0,240)});
+ return recipients.length ? {id:id.toLowerCase(),recipients} : null;
 }
 
 async function textPreviews(imap, items) {
@@ -255,6 +284,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   imap.on?.('error',()=>{});
   const mail = [];
   const contacts = new Map();
+  const reports = [];
   let folders;
   let previewBudget = 3_000_000;
   try {
@@ -294,6 +324,13 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
        }
       }
       const id = entry.path+':'+uidValidity+':'+item.uid;
+      if (folder==='Inbox' && raw) {
+       const report = deliveryReport(raw,{from,subject:envelope?.subject||''});
+       if (report) {
+        reports.push({...report,messageId:id,date:item.internalDate?.toISOString()||new Date().toISOString(),
+         successOnly:report.recipients.every(entry=>['delivered','relayed','expanded'].includes(entry.action))});
+       }
+      }
       const headerId = parsed?.messageId || envelope?.messageId || '';
       const references = mimeReferences(parsed,envelope);
       const subject = envelope?.subject || '(No subject)';
@@ -318,7 +355,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
   const stored = config.storedLabels instanceof Map ? config.storedLabels : new Map();
   // Skip mail already decided by saved AI labels or admin keywords, so the model only sees what it can change.
   const labels = await groqCategories(mail.filter(row=>!stored.has(row.id)&&!keywordCategory(row.subject,row.body,config.keywords||[])),
-   config.email,config.groqKey,fetchGroq,{deadline:config.groqDeadline});
+   config.email,config.groqKey,fetchGroq,{deadline:config.groqDeadline,cloudflare:config.cloudflare});
   const aiLabels = new Map(labels);
   for (const [id,category] of stored) if (!labels.has(id)) labels.set(id,category);
   for (const row of mail) {
@@ -331,7 +368,7 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    row.category = category;
    row.due = category==='Bid Invitations' ? bidDue(row.subject,row.body) : undefined;
   }
-  return {email:config.email,folders:[...new Set(folders.map(folderName))],contacts:[...contacts.values()],mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),
+  return {email:config.email,folders:[...new Set(folders.map(folderName))],contacts:[...contacts.values()],mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),reports,
    ...(config.returnAiLabels?{aiLabels:Object.fromEntries(aiLabels)}:{})};
  }
 
@@ -638,6 +675,26 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
    }
    return {mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),next:remaining,failed,deferred:queue.length>batch.length};
   },
+  // Success-only delivery reports move out of Inbox into an "A2Z Delivery Reports" folder after they are recorded.
+  async archiveReports(ids) {
+   const byUid=ids.map(messageLocation).filter(match=>match&&match[1]==='INBOX');
+   if (!byUid.length) return 0;
+   const imap=new Imap(config.imap);
+   imap.on?.('error',()=>{});
+   try {
+    await imap.connect();
+    const target='A2Z Delivery Reports';
+    if (!(await imap.list()).some(entry=>entry.path===target)) await imap.mailboxCreate(target).catch(()=>{});
+    const lock=await imap.getMailboxLock('INBOX');
+    try {
+     const generation=String(imap.mailbox.uidValidity);
+     const uids=byUid.filter(match=>match[2]===generation).map(match=>match[3]);
+     if (!uids.length) return 0;
+     await imap.messageMove(uids.join(','),target,{uid:true});
+     return uids.length;
+    } finally {lock.release();}
+   } finally {imap.close();}
+  },
   // Text excerpts for several messages over one connection (Ask AI context).
   async textExcerpts(ids,chars=4000) {
    const byFolder=new Map();
@@ -887,9 +944,10 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     messageId:'<'+id+'@'+config.email.split('@')[1]+'>',
     references:refs,inReplyTo:refs.at(-1),disableFileAccess:true,disableUrlAccess:true,
    };
-   const result = await smtp.sendMail(message);
+   // Ask receiving servers for delivery reports. Sent only when IONOS advertises DSN support.
+   const result = await smtp.sendMail({...message,dsn:{id,return:'headers',notify:['success','failure','delay'],recipient:config.email}});
    const sentSaved = await saveSent(message);
-   return {messageId:result.messageId,rejected:result.rejected||[],sentSaved};
+   return {messageId:result.messageId,accepted:result.accepted||[],rejected:result.rejected||[],sentSaved};
   },
  };
  return mailbox;
