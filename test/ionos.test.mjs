@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createIonosMailbox, ionosConfig } from '../server/ionos.mjs';
-import { groqCategories, resetGroqRest } from '../server/groq-classification.mjs';
+import { groqCategories } from '../server/groq-classification.mjs';
+import { llmConfig, resetLlmState } from '../server/intel/llm.mjs';
 import { appendSignature, dashboardQueues, seed } from '../src/model.mjs';
 
 const env = {
@@ -60,13 +61,15 @@ test('IONOS adapter reads a message and sends a signed reply using the authentic
  assert.equal(mail[0].due,'2026-12-03');
  assert.equal(options.auth.user,env.IONOS_EMAIL);
 
- const enhanced = createIonosMailbox(ionosConfig({...env,GROQ_API_KEY:' fixture-groq-key '}),{
+ resetLlmState();
+ const enhanced = createIonosMailbox(ionosConfig({...env,CLOUDFLARE_ACCOUNT_ID:'a'.repeat(32),CLOUDFLARE_API_TOKEN:' fixture-cf-token '}),{
   Imap:FakeImap,transport:()=>({}),
   fetchGroq:async (url,{headers,body})=>{
-   assert.equal(url,'https://api.groq.com/openai/v1/chat/completions');
-   assert.equal(headers.Authorization,'Bearer fixture-groq-key');
+   assert.equal(url,'https://api.cloudflare.com/client/v4/accounts/'+'a'.repeat(32)+'/ai/v1/chat/completions');
+   assert.equal(headers.Authorization,'Bearer fixture-cf-token');
    const request=JSON.parse(body);
-   assert.equal(request.response_format.json_schema.strict,true);
+   assert.equal(request.model,'@cf/openai/gpt-oss-120b');
+   assert.equal(request.response_format.type,'json_object');
    assert.deepEqual(JSON.parse(request.messages[1].content),[
     {index:0,subject:'Invitation to bid',excerpt:'Bid due: 2026-12-03'},
    ]);
@@ -96,20 +99,22 @@ function groqReply(results) {
  return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({results})}}]});
 }
 
-test('Groq batches fall back on uncertainty, failures and ambiguous output',async ()=>{
+test('AI sorting uses Cloudflare and falls back on uncertainty, failures and ambiguous output',async ()=>{
  const mail=[
   {id:'a',folder:'Inbox',subject:'Demo Bid',body:'Scope attached.\n\n-----Original Message-----\nOld invoice'},
   {id:'b',folder:'Inbox',subject:'Project Message',body:'Hello'},
   {id:'c',folder:'Spam',subject:'Do not send',body:'Spam'},
  ];
- const email='groq-test@example.test';
- const key='fixture-only';
- assert.equal((await groqCategories(mail,email,undefined,()=>assert.fail('Groq is disabled'))).size,0);
- assert.equal((await groqCategories(mail,email,key,async()=>new Response(null,{status:429}))).size,0);
- resetGroqRest(); // a 429 benches Groq for 30 s; clear it for the next cases
- assert.equal((await groqCategories(mail,email,key,async()=>groqReply([
+ const email='cf-sort-test@example.test';
+ const cloudflare=llmConfig({CLOUDFLARE_ACCOUNT_ID:'b'.repeat(32),CLOUDFLARE_API_TOKEN:'fixture-token'});
+ resetLlmState();
+ assert.equal((await groqCategories(mail,email,undefined,()=>assert.fail('AI is disabled'))).size,0);
+ assert.equal((await groqCategories(mail,email,undefined,async()=>new Response(null,{status:429}),{cloudflare})).size,0);
+ resetLlmState();
+ assert.equal((await groqCategories(mail,email,undefined,async()=>groqReply([
   {index:0,category:'Invoices'},{index:0,category:'Estimating'},
- ]))).size,0);
+ ]),{cloudflare})).size,0);
+ resetLlmState();
  const classify=async (_url,{body})=>{
   assert.deepEqual(JSON.parse(JSON.parse(body).messages[1].content),[
    {index:0,subject:'Demo Bid',excerpt:'Scope attached.'},
@@ -117,12 +122,12 @@ test('Groq batches fall back on uncertainty, failures and ambiguous output',asyn
   ]);
   return groqReply([{index:1,category:'Uncertain'},{index:0,category:'Estimating'}]);
  };
- assert.deepEqual([...await groqCategories(mail,email,key,classify)],[['a','Estimating']]);
+ assert.deepEqual([...await groqCategories(mail,email,undefined,classify,{cloudflare})],[['a','Estimating']]);
  const requests=[];
- const refreshed=await groqCategories(mail,email,key,async (_url,{body})=>{
+ const refreshed=await groqCategories(mail,email,undefined,async (_url,{body})=>{
   requests.push(...JSON.parse(JSON.parse(body).messages[1].content));
   return groqReply([{index:0,category:'General'}]);
- });
+ },{cloudflare});
  assert.deepEqual(requests.map(message=>message.subject),['Project Message']);
  assert.deepEqual([...refreshed],[['a','Estimating'],['b','General']]);
 });

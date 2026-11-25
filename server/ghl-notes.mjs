@@ -6,7 +6,7 @@ import {cloudflareConfig,cloudflareJson} from './cloudflare-ai.mjs';
 // Posts AI email summaries to existing HighLevel contacts as internal comments.
 // - Contacts are matched by exact email only. Contacts are never created.
 // - Matches and conversation IDs are cached in Blobs, so each address is looked up at most once a week.
-// - Summaries are made in batches with one small Groq call per 8 emails.
+// - Summaries are made in batches with one Cloudflare Workers AI call per 8 emails.
 // - Each email is posted once per contact, even if several mailboxes received it.
 
 const api = 'https://services.leadconnectorhq.com';
@@ -15,7 +15,6 @@ const settingsKey = 'ghl-notes';
 const matchDays = 7;
 const missDays = 1;
 const maxPostsPerRun = 120;
-const summaryModel = 'openai/gpt-oss-20b';
 const summaryBatch = 8;
 const firstRunHours = 24;
 
@@ -156,25 +155,14 @@ async function summarize(items,groqKey,fetcher,cloudflare=null) {
  const results = new Map();
  for (let start=0;start<items.length;start+=summaryBatch) {
   const batch = items.slice(start,start+summaryBatch);
-  try {
-   const response = await fetcher('https://api.groq.com/openai/v1/chat/completions',{method:'POST',signal:AbortSignal.timeout(20000),
-    headers:{Authorization:'Bearer '+groqKey,'Content-Type':'application/json'},
-    body:JSON.stringify({model:summaryModel,reasoning_effort:'low',temperature:0.1,max_completion_tokens:2500,
-     response_format:{type:'json_schema',json_schema:{name:'email_summaries',strict:true,schema:summarySchema}},
-     messages:[{role:'system',content:summaryPrompt},{role:'user',content:JSON.stringify(batch.map((item,index)=>({index,subject:item.subject,from:item.from,
-      to:item.to,date:item.date,text:item.text})))}]})});
-   let parsed = null;
-   if (response.ok) parsed = JSON.parse((await response.json())?.choices?.[0]?.message?.content||'{}');
-   // Groq rate limited or failed: Cloudflare Workers AI writes the same summaries.
-   if (!parsed?.results&&cloudflare) parsed = await cloudflareJson(cloudflare,{system:summaryPrompt+'\nReturn {"results":[{"index":0,"summary":"..."}]}.',
-    user:JSON.stringify(batch.map((item,index)=>({index,subject:item.subject,from:item.from,to:item.to,date:item.date,text:item.text}))),maxTokens:2500},fetcher).catch(()=>null);
-   if (!parsed?.results) continue;
-   for (const entry of parsed.results||[]) {
-    const item = batch[entry.index];
-    const text = typeof entry.summary==='string' ? entry.summary.replace(/[–—]/g,'-').trim().slice(0,1200) : '';
-    if (item&&text) results.set(item.key,text);
-   }
-  } catch { /* A failed batch is retried next run because nothing was marked posted. */ }
+  // Cloudflare Workers AI writes the summaries. Groq was removed.
+  const parsed = await cloudflareJson(cloudflare,{system:summaryPrompt+'\nReturn {"results":[{"index":0,"summary":"..."}]}.',
+   user:JSON.stringify(batch.map((item,index)=>({index,subject:item.subject,from:item.from,to:item.to,date:item.date,text:item.text}))),maxTokens:2500,feature:'crm-notes'},fetcher).catch(()=>null);
+  for (const entry of parsed?.results||[]) {
+   const item = batch[entry.index];
+   const text = typeof entry.summary==='string' ? entry.summary.replace(/[\u2013\u2014]/g,'-').trim().slice(0,1200) : '';
+   if (item&&text) results.set(item.key,text);
+  }
  }
  return results;
 }
@@ -194,7 +182,7 @@ export async function postEmailNotes({env,email,mail,settings,store,fetcher=fetc
  if (!settings?.enabled) return {status:'off'};
  if (!config) return {status:'skipped',detail:'Set GHL_CONVERSATIONS_PIT_TOKEN, GHL_CONTACTS_PIT_TOKEN and the location ID'};
  const cloudflare = cloudflareConfig(env);
- if (!groqKey&&!cloudflare) return {status:'skipped',detail:'Set GROQ_API_KEY or the Cloudflare Workers AI variables'};
+ if (!cloudflare) return {status:'skipped',detail:'Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN'};
  const since = Date.parse(await store.checkpoint(email)||new Date(now-settings.lookbackHours*3600000).toISOString());
  const own = email.toLowerCase();
  const candidates = [];

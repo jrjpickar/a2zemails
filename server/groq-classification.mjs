@@ -2,8 +2,7 @@ import {createHash} from 'node:crypto';
 import {categories,currentMessageText} from '../src/model.mjs';
 import {cloudflareJson} from './cloudflare-ai.mjs';
 
-let groqRestUntil = 0;
-export function resetGroqRest() {groqRestUntil = 0;}
+export function resetGroqRest() {}
 
 const model = 'openai/gpt-oss-120b';
 const deadlineMs = 8000;
@@ -53,29 +52,9 @@ function excerpt(value,limit) {
 
 async function classifyBatch(batch,key,signal,fetcher,output,cloudflare) {
  const messages = batch.map(({subject,body},index)=>({index,subject,excerpt:body}));
- let parsed = null;
- let groqBenched = !key || (groqRestUntil>Date.now());
- if (!groqBenched) {
-  const response = await fetcher('https://api.groq.com/openai/v1/chat/completions',{
-   method:'POST',
-   headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
-   signal,
-   body:JSON.stringify({
-    model,reasoning_effort:'low',temperature:0,max_completion_tokens:2000,
-    response_format:responseFormat,
-    messages:[{role:'system',content:instructions},{role:'user',content:JSON.stringify(messages)}],
-   }),
-  });
-  if (response.ok) {
-   const {choices} = await response.json();
-   if (choices?.[0]?.finish_reason==='stop') parsed = JSON.parse(choices[0].message.content);
-  } else if (response.status===429) groqRestUntil = Date.now()+30000;
- }
- // Groq rate limited or failed: Cloudflare Workers AI sorts the same batch.
- if (!parsed && cloudflare) {
-  parsed = await cloudflareJson(cloudflare,{system:instructions+'\nReturn {"results":[{"index":0,"category":"..."}]} using only these categories: '+[...categories,abstain].join(', ')+'.',
-   user:JSON.stringify(messages),signal}).catch(()=>null);
- }
+ // Cloudflare Workers AI (primary model, then fallback). Groq was removed.
+ const parsed = cloudflare ? await cloudflareJson(cloudflare,{system:instructions+'\nReturn {"results":[{"index":0,"category":"..."}]} with one result per input, using only these categories: '+[...categories,abstain].join(', ')+'.',
+  user:JSON.stringify(messages),signal,feature:'sorting'},fetcher).catch(()=>null) : null;
  if (!parsed) return;
 
  const results = parsed.results;
@@ -99,7 +78,7 @@ async function classifyBatch(batch,key,signal,fetcher,output,cloudflare) {
 
 export async function groqCategories(mail,email,key,fetcher=fetch,{deadline=deadlineMs,cloudflare=null}={}) {
  const labels = new Map();
- if (!key&&!cloudflare) return labels;
+ if (!cloudflare) return labels;
  const pending = [];
  for (const message of mail) {
   if (message.folder!=='Inbox') continue;

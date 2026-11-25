@@ -45,7 +45,7 @@ test('scheduled sort stores AI labels per mailbox and skips mailboxes without a 
  };
  const seen=[];
  const makeMailbox=config=>({mail:async()=>{seen.push(config);return {mail:[{id:'INBOX:1:5',date:'2026-11-24T10:00:00Z'}],aiLabels:{'INBOX:1:5':'Bid Invitations'}};}});
- const summary=await runScheduledSort({GROQ_API_KEY:'k'},{directory,admin:{keywords:async()=>[{term:'pricing due',category:'Bid Invitations'}]},labels,makeMailbox});
+ const summary=await runScheduledSort({CLOUDFLARE_ACCOUNT_ID:'d'.repeat(32),CLOUDFLARE_API_TOKEN:'k'},{directory,admin:{keywords:async()=>[{term:'pricing due',category:'Bid Invitations'}]},labels,makeMailbox});
  assert.deepEqual(summary.results.map(({email,status})=>[email,status]),[['jesse@a2z.example','ok'],['crew@a2z.example','skipped']]);
  assert.equal(seen[0].keywords[0].term,'pricing due');
  assert.equal(seen[0].groqDeadline,90000);
@@ -71,7 +71,7 @@ test('saved AI labels apply on load and only new mail goes to the model', async 
   sent.push(items.map(item=>item.subject));
   return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({results:items.map(item=>({index:item.index,category:'Dispatch'}))})}}]});
  };
- const config={...ionosConfig({A2Z_MODE:'live',A2Z_ENABLE_LIVE:'true',IONOS_EMAIL:'jesse@a2z.example',IONOS_PASSWORD:'x',GROQ_API_KEY:'k'}),
+ const config={...ionosConfig({A2Z_MODE:'live',A2Z_ENABLE_LIVE:'true',IONOS_EMAIL:'jesse@a2z.example',IONOS_PASSWORD:'x',CLOUDFLARE_ACCOUNT_ID:'d'.repeat(32),CLOUDFLARE_API_TOKEN:'k'}),
   storedLabels:new Map([['INBOX:4:1','Estimating']]),returnAiLabels:true};
  const {mail,aiLabels}=await createIonosMailbox(config,{Imap:FakeImap,transport:()=>({}),fetchGroq}).mail();
  assert.deepEqual(sent,[['Weekly update 2']]);

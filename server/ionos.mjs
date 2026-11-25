@@ -7,7 +7,7 @@ import { MAX_STAGED_BYTES } from './staged-attachments.mjs';
 import { mailAttachments } from './mail-attachments.mjs';
 import { groqCategories } from './groq-classification.mjs';
 import { cloudflareConfig } from './cloudflare-ai.mjs';
-import { classify as classifyBase, keywordCategory } from '../src/model.mjs';
+import { classify as classifyBase, keywordCategory, currentMessageText } from '../src/model.mjs';
 
 // The project list in src/model.mjs is sandbox sample data (Harbor Point, Westfield, Riverside, Civic Center).
 // Matching real mail against it tagged any email naming Riverside or Westfield as an active project, including bid invites.
@@ -674,6 +674,56 @@ export function createIonosMailbox(config, {Imap=ImapFlow, parser=simpleParser, 
     }
    }
    return {mail:mail.sort((a,b)=>b.date.localeCompare(a.date)),next:remaining,failed,deferred:queue.length>batch.length};
+  },
+  // Incremental index sync for Ask AI and MCP. Read-only. Returns new rows (newest first on the first run),
+  // a backfill page below the oldest indexed UID, and current flags for the most recent indexed UIDs.
+  indexFolders() {
+   return readConnection(async imap=>(await imap.list()).filter(entry=>isMailFolder(entry)).map(entry=>({path:entry.path,folder:folderName(entry)})));
+  },
+  async indexFolder(path,{uidValidity,highUid=0,lowUid=0,newLimit=300,backfillLimit=150,flagUids=[]}={}) {
+   return readFolder(path,async imap=>{
+    const generation=String(imap.mailbox.uidValidity);
+    const uidNext=Number(imap.mailbox.uidNext)||1;
+    const reset=Boolean(uidValidity&&uidValidity!==generation);
+    const high=reset?0:highUid, low=reset?0:lowUid;
+    const pick=async(range,limit,newest)=>{
+     if (limit<=0) return [];
+     const found=await imap.search({uid:range},{uid:true});
+     const sorted=(found||[]).sort((a,b)=>a-b);
+     return newest?sorted.slice(-limit):sorted.slice(0,limit);
+    };
+    let fresh=[];
+    if (!high) fresh=uidNext>1?await pick('1:'+(uidNext-1),newLimit,true):[];
+    else if (uidNext-1>high) fresh=await pick((high+1)+':'+(uidNext-1),newLimit,false);
+    const floor=high?low:(fresh[0]||0);
+    const older=floor>1&&backfillLimit>0?(await pick('1:'+(floor-1),backfillLimit,true)):[];
+    const wanted=[...fresh,...older];
+    const rows=wanted.length?await imap.fetchAll(wanted,{uid:true,envelope:true,internalDate:true,flags:true,size:true,bodyStructure:true,headers:['references']},{uid:true}):[];
+    const previews=await textPreviews(imap,rows);
+    const folder=folderName({path,specialUse:imap.mailbox.specialUse,flags:new Set()});
+    const toRow=item=>{
+     const envelope=item.envelope||{};
+     const subject=envelope.subject||'(No subject)';
+     const preview=currentMessageText(previews.get(item.uid)||'').replace(/\s+/g,' ').trim().slice(0,1200);
+     const from=addressList(envelope.from);
+     const refs=String(item.headers?.toString?.('utf8')||'').match(/<[^<>\s]+>/g)||[];
+     return {id:path+':'+generation+':'+item.uid,uid:item.uid,path,folder,date:item.internalDate?.toISOString()||null,
+      from,fromName:envelope.from?.[0]?.name||'',to:addressList(envelope.to),cc:addressList(envelope.cc),subject,
+      messageId:envelope.messageId||'',inReplyTo:envelope.inReplyTo||'',refs:refs.slice(-6),
+      flags:[...(item.flags||[])].filter(flag=>/^\\(Seen|Answered|Flagged)$/.test(flag)),
+      attachments:attachedFiles(item.bodyStructure).map(file=>({name:file.name,type:file.type,size:file.size,part:file.part})),
+      preview,category:classify(subject,preview,from),deleted:Boolean(item.flags?.has('\\Deleted'))};
+    };
+    const built=rows.map(toRow).filter(row=>!row.deleted);
+    let flags=null;
+    const recheck=reset?[]:flagUids.filter(uid=>Number.isSafeInteger(uid)).slice(-400);
+    if (recheck.length) {
+     const current=await imap.fetchAll(recheck,{uid:true,flags:true},{uid:true});
+     flags=Object.fromEntries((current||[]).filter(item=>!item.flags?.has('\\Deleted')).map(item=>[item.uid,[...item.flags].filter(flag=>/^\\(Seen|Answered|Flagged)$/.test(flag))]));
+    }
+    return {uidValidity:generation,reset,folder,uidNext,rows:built,newHigh:fresh.length?Math.max(high,...fresh):high,
+     newLow:Math.min(...[floor||Infinity,...older].filter(Boolean)),reachedStart:(older.length?older[0]:floor)<=1,flags};
+   });
   },
   // Success-only delivery reports move out of Inbox into an "A2Z Delivery Reports" folder after they are recorded.
   async archiveReports(ids) {

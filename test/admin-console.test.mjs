@@ -81,14 +81,14 @@ test('admin console routes are senior admin only and keywords reach the mailbox'
  let seenKeywords;
  const handler=createHostedHandler({
   A2Z_MODE:'live',SESSION_SECRET:'fixture-session-key-only-000000000000000000000000000000',
-  IONOS_ALLOWED_MAILBOXES:'crew@a2z.example',SENIOR_ADMIN_EMAILS:admin,GROQ_API_KEY:'fixture',
+  IONOS_ALLOWED_MAILBOXES:'crew@a2z.example',SENIOR_ADMIN_EMAILS:admin,CLOUDFLARE_ACCOUNT_ID:'c'.repeat(32),CLOUDFLARE_API_TOKEN:'fixture-cloudflare',
  },{
   Imap:FakeImap,
   directoryFactory:env=>teamDirectory(env,{storeFactory:()=>stores('team-directory'),ttl:0}),
   adminFactory:()=>adminConsole({storeFactory:stores}),
   mailboxFactory:config=>({mail:async()=>{seenKeywords=config.keywords;return {email:config.email,mail:[],contacts:[]};}}),
   smtpFactory:()=>({verify:async()=>true}),
-  fetcher:async url=>url.includes('groq.com')?Response.json({data:[{id:'openai/gpt-oss-120b'}]}):new Response(null,{status:404}),
+  fetcher:async url=>url.includes('/ai/models/search')?Response.json({result:[{name:'@cf/openai/gpt-oss-120b'},{name:'@cf/openai/gpt-oss-20b'}]}):new Response(null,{status:404}),
  });
  const call=(action,{body,token}={})=>handler(new Request('https://test.example/.netlify/functions/ionos?action='+action,{
   method:body?'POST':'GET',
@@ -114,8 +114,8 @@ test('admin console routes are senior admin only and keywords reach the mailbox'
  const byName=Object.fromEntries(health.checks.map(check=>[check.name,check]));
  assert.equal(byName['IONOS mailbox (IMAP)'].status,'ok');
  assert.equal(byName['IONOS sending (SMTP)'].status,'ok');
- assert.equal(byName['Groq (Ask AI and sorting)'].status,'ok');
- assert.match(byName['Groq (Ask AI and sorting)'].detail,/Web search on/);
- assert.equal(byName['Gemini (Ask AI backup)'].status,'warn');
+ assert.equal(byName['Cloudflare Workers AI'].status,'ok');
+ assert.match(byName['Cloudflare Workers AI'].detail,/Primary @cf\/openai\/gpt-oss-120b, fallback @cf\/openai\/gpt-oss-20b/);
+ assert.equal(byName['Gemini (bid scans and attachment text backup)'].status,'warn');
  assert.equal(JSON.stringify(health).includes('fixture'),false,'no secrets in health output');
 });

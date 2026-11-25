@@ -19,6 +19,32 @@ export async function hostedRequest(action:string, body?:object, token?:string, 
  return data;
 }
 
+// Server-Sent Events over POST (Ask AI streaming). Calls onEvent(name,data) for each event.
+export async function hostedStream(action:string,body:object,token:string|undefined,signal:AbortSignal,onEvent:(event:string,data:any)=>void) {
+ const response=await fetch(hostedEndpoint+'?action='+action,{method:'POST',cache:'no-store',signal,
+  headers:{...(token?{Authorization:token===rememberedSession?token:'Bearer '+token}:{}),'Content-Type':'application/json',Accept:'text/event-stream'},
+  body:JSON.stringify(body)});
+ if (!response.ok||!response.body) {
+  const data=await response.json().catch(()=>({}));
+  throw Object.assign(new Error(data.error||(response.status===429?'Too many requests. Wait a moment and try again.':'Ask AI could not start.')),{status:response.status});
+ }
+ const reader=response.body.getReader();
+ const decoder=new TextDecoder();
+ let buffer='';
+ for (;;) {
+  const {value,done}=await reader.read();
+  if (done) break;
+  buffer+=decoder.decode(value,{stream:true});
+  let index;
+  while ((index=buffer.indexOf('\n\n'))>=0) {
+   const block=buffer.slice(0,index);buffer=buffer.slice(index+2);
+   const event=block.match(/^event: (.+)$/m)?.[1]||'message';
+   const data=block.match(/^data: (.*)$/m)?.[1];
+   if (data!==undefined) {try {onEvent(event,JSON.parse(data));} catch {}}
+  }
+ }
+}
+
 export function MailboxLogin({ready,onLogin,notice,retry}:{ready:boolean;onLogin:(token:string)=>void;notice?:string;retry?:()=>void}) {
  const [busy,setBusy]=useState(false);
  const [error,setError]=useState('');

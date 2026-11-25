@@ -11,11 +11,11 @@ import {uploadLargeFile,type LargeFile} from './large-upload';
 import {AttachmentPreview,type AttachmentSource,type MailAttachment,type ForwardedAttachment} from './attachment-preview';
 import {useComposePosition} from './compose-position';
 import {MessageText} from './message-text';
-import {AskAi} from './ask-ai';
+import {AskAi,type AskRunner,type AskSource} from './ask-ai';
 import {BidImportReport} from './bid-import-report';
 import {RecipientInput,type Contact} from './recipient-input';
 import {AdminConsole} from './admin-console';
-import {rememberedSession,hostedRequest,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
+import {rememberedSession,hostedRequest,hostedStream,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
 import './style.css';
 import './theme.css';
 const temperatures=[['cold','Cold'],['warm','Warm'],['hot','Hot'],['vip','VIP']] as const;
@@ -359,6 +359,27 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   if (folder==='Active Projects') return Boolean(message.project)&&message.category!=='Bid Invitations'&&!['Trash','Spam'].includes(message.folder);
   if (categories.includes(folder)) return message.category===folder&&!['Trash','Spam'].includes(message.folder);
   return message.folder===folder;
+ }
+ // Ask AI: hosted mode streams from the server; local and sandbox modes return one answer.
+ const runAsk:AskRunner=async(body,signal,onEvent)=>{
+  const input=body as {question:string;openId?:string};
+  if (hosted&&liveToken) return hostedStream('ask-ai',body,liveToken,signal,onEvent);
+  const data=await askAboutMail(input.openId,input.question,[]);
+  onEvent('replace',{text:data.answer});
+  onEvent('done',{content:data.answer,model:data.model||null,sources:[],actions:[],degraded:data.excerptsOnly?'unavailable':null});
+ };
+ // Opens an email cited by Ask AI, even if it is older than the loaded window.
+ function openSource(source:AskSource) {
+  if (!mail.some(item=>item.id===source.id)) {
+   const stub:Message={id:source.id,thread:source.id,name:source.fromName||source.from,company:'',subject:source.subject,date:source.date||new Date().toISOString(),
+    body:source.excerpt||'',needsBody:true,files:[],from:source.from,to:'',cc:'',category:'General',project:'',folder:source.folder,unread:false,star:false,older:true,
+    headers:{messageId:'',references:[]}};
+   setState(previous=>({...previous,mail:[...previous.mail,stub]}));
+  }
+  const standard=groups[1].links.some(([name])=>name===source.folder);
+  go(standard?source.folder:customFolderPrefix+source.folder);
+  setSelected(source.id);
+  setMobileRead(true);
  }
  async function askAboutMail(id:string|undefined,question:string,history:object[]) {
   if (liveToken) {
@@ -1034,8 +1055,10 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <div className="sidebar-end"><div className="env"><i/> {liveToken ? connection : 'Sandbox workspace'}</div><div className="profile"><div className="profile-avatar">{initials(userName).toUpperCase()}</div><div><b title={account||undefined}>{userName}</b><small>{profile?.admin?'Senior admin':'A2Z Construction'}</small></div>{profile?.admin&&hosted&&<button title="Admin console" aria-label="Admin console" onClick={()=>setTeamOpen(true)}><Users size={17}/></button>}<button title="Keyboard shortcuts" onClick={()=>setHelp(true)}><MoreHorizontal size={17}/></button></div></div>
  </aside>
  <main>
- <header className={'topbar'+((mailFeatures.askAi||!liveToken)?' topbar-with-ai':'')}><button className="icon nav-toggle" aria-label="Toggle navigation" onClick={()=>setSide(!side)}><Menu size={20}/></button><div className="crumb"><PanelLeft size={16}/> <span>Workspace</span><span className="slash">/</span><b>{query?'Search':viewName}</b></div>{(mailFeatures.askAi||!liveToken)&&<AskAi toolbar prefill={query} subject={currentRow?.subject} onUseReply={currentRow&&!currentRow.id.startsWith('out-')?text=>start('Reply',currentRow,text):undefined}
-  ask={(question,history,aboutOpenEmail)=>askAboutMail(aboutOpenEmail?currentRow?.id:undefined,question,history)}/>}<div className="search">
+ <header className={'topbar'+((mailFeatures.askAi||!liveToken)?' topbar-with-ai':'')}><button className="icon nav-toggle" aria-label="Toggle navigation" onClick={()=>setSide(!side)}><Menu size={20}/></button><div className="crumb"><PanelLeft size={16}/> <span>Workspace</span><span className="slash">/</span><b>{query?'Search':viewName}</b></div>{(mailFeatures.askAi||!liveToken)&&<AskAi toolbar prefill={query} live={Boolean(liveToken&&hosted)} run={runAsk}
+  request={hosted?(action,body)=>liveRequest(action,body):undefined}
+  context={{openId:currentRow&&!currentRow.id.startsWith('out-')?currentRow.id:undefined,openSubject:currentRow?.subject,openCategory:currentRow?.category,view:query?'Search':viewName,folder:currentSearchFolder}}
+  onOpenSource={openSource} onUseReply={currentRow&&!currentRow.id.startsWith('out-')?text=>start('Reply',currentRow,text):undefined}/>}<div className="search">
   <button className="icon search-filter-trigger" type="button" title="Search filters" aria-label="Search filters"
    aria-expanded={menu==='search-filters'} onClick={()=>setMenu(menu==='search-filters'?'':'search-filters')}><SlidersHorizontal size={17}/></button>
   <input id="search" placeholder="Search mail, projects, attachments…" value={query} onChange={e=>{setQuery(e.target.value);setMobileRead(false);setLimit(60)}}/>{query?<button className="icon" title="Clear search" onClick={()=>setQuery('')}><X size={14}/></button>:<kbd>/</kbd>}</div><button className="theme-toggle" aria-label={theme==='dark'?'Switch to color mode':'Switch to dark mode'} onClick={()=>setTheme(theme==='dark'?'color':'dark')}>{theme==='dark'?<Moon size={15}/>:<Palette size={15}/>}<span>{theme==='dark'?'Dark mode':'Color mode'}</span></button><button className="demo-pill" onClick={()=>setMenu(menu==='sandbox'?'':'sandbox')}><i/> {liveToken?'IONOS':'Sandbox'} <ChevronDown size={12}/></button>

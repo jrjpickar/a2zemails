@@ -90,12 +90,14 @@ test('Ask AI includes old mailbox excerpts even with no selected message',async 
   async mailSearch({query}) {assert.match(query,/hollister/);return {mail:[old]};},
   async body(id,opts) {assert.equal(id,old.id);assert.equal(opts.includeImages,false);return {body:'Submittals due Friday.'};},
  };
- const result=await askEmail({gemini:'fixture'},mailbox,{question:'Find the old Hollister proposal'},async (_url,{body})=>{
-  const prompt=JSON.parse(JSON.parse(body).contents[0].parts[0].text);
+ const {aiConfig,resetCooldowns}=await import('../server/ask-ai.mjs');
+ resetCooldowns();
+ const result=await askEmail(aiConfig({CLOUDFLARE_ACCOUNT_ID:'6'.repeat(32),CLOUDFLARE_API_TOKEN:'fixture'}),mailbox,{question:'Find the old Hollister proposal'},async (_url,{body})=>{
+  const prompt=JSON.parse(JSON.parse(body).messages.at(-1).content);
   assert.deepEqual(prompt.mailboxMatches.excerpts,[{
    subject:old.subject,from:old.from,date:old.date,folder:old.folder,excerpt:'Submittals due Friday.',
   }]);
-  return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:'Friday.'}]}}]});
+  return Response.json({choices:[{message:{content:'Friday.'}}]});
  });
  assert.equal(result.status,200);
 });

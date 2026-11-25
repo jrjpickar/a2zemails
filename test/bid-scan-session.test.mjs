@@ -70,27 +70,28 @@ test('Optimized intake gives all matching messages AI review in bounded parallel
  assert.equal(stored.complete,true);
 });
 
-test('Bid extraction falls back across Groq models and cools down timed-out models',async ()=>{
- const {runAiChain}=await import('../server/ask-ai.mjs');
+test('Bid extraction falls back from Gemini to Cloudflare models and cools down timed-out models',async ()=>{
+ const {runAiChain,aiConfig,resetCooldowns}=await import('../server/ask-ai.mjs');
+ resetCooldowns();
  const attempted=[];
  const cooldowns=new Map();
  const fetcher=async (url,options)=>{
   const request=JSON.parse(options.body);
   const model=url.includes('googleapis.com')?'Gemini':request.model;
   attempted.push(model);
-  if (model!=='qwen/qwen3.8-27b') throw new DOMException('Fixture timeout','TimeoutError');
-  assert.equal(request.response_format.type,'json_schema');
+  if (model!=='@cf/openai/gpt-oss-20b') throw new DOMException('Fixture timeout','TimeoutError');
+  assert.equal(request.response_format.type,'json_object');
   return Response.json({choices:[{message:{content:'{"invites":[]}'}}]});
  };
  const settings={bidScan:true,cooldowns,fetcher,json:true,schema:{type:'object'},validate:JSON.parse};
- const config={gemini:'fixture',groq:'fixture'};
+ const config=aiConfig({GEMINI_API_KEY:'fixture',CLOUDFLARE_ACCOUNT_ID:'7'.repeat(32),CLOUDFLARE_API_TOKEN:'fixture'});
  const messages=[{role:'user',content:'Bid invite'}];
  const first=await runAiChain(config,messages,settings);
- assert.equal(first.model,'qwen/qwen3.8-27b');
- assert.deepEqual(attempted,['Gemini','openai/gpt-oss-120b','openai/gpt-oss-20b','qwen/qwen3.8-27b']);
+ assert.equal(first.model,'@cf/openai/gpt-oss-20b');
+ assert.deepEqual(attempted,['Gemini','@cf/openai/gpt-oss-120b','@cf/openai/gpt-oss-20b']);
  attempted.length=0;
- assert.equal((await runAiChain(config,messages,settings)).provider,'Groq');
- assert.deepEqual(attempted,['qwen/qwen3.8-27b']);
+ assert.equal((await runAiChain(config,messages,settings)).provider,'Cloudflare');
+ assert.deepEqual(attempted,['@cf/openai/gpt-oss-20b']);
 });
 
 test('A failed candidate does not block other waves and retry touches only the failed email',async ()=>{

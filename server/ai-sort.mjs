@@ -2,6 +2,7 @@ import {getStore} from '@netlify/blobs';
 import {createHash} from 'node:crypto';
 import {createIonosMailbox,ionosConfig} from './ionos.mjs';
 import {noteStore,postEmailNotes} from './ghl-notes.mjs';
+import {mailIndex} from './intel/index.mjs';
 
 // Scheduled AI sorting. Runs at 9 AM and 3 PM Pacific for every active mailbox with a saved password,
 // stores the AI's categories in Netlify Blobs, and the inbox applies them on load without asking the AI again.
@@ -70,11 +71,14 @@ export async function runScheduledSort(env,{directory,admin,labels=aiLabelStore(
   try {
    const config = {...ionosConfig({...env,A2Z_MODE:'live',A2Z_ENABLE_LIVE:'true',IONOS_EMAIL:user.email,IONOS_PASSWORD:password}),
     keywords,storedLabels:await labels.load(user.email),groqDeadline:90_000,returnAiLabels:true};
-   if (!config.groqKey) throw new Error('GROQ_API_KEY is not set');
-   const data = await makeMailbox(config).mail({includeTrash:false});
+   if (!config.cloudflare) throw new Error('Cloudflare Workers AI is not configured');
+   const mailbox = makeMailbox(config);
+   const data = await mailbox.mail({includeTrash:false});
    const fresh = new Map(Object.entries(data.aiLabels||{}));
    const dates = new Map(data.mail.map(row=>[row.id,row.date]));
    const stored = await labels.save(user.email,fresh,dates);
+   // Refresh the Ask AI / MCP index and backfill older mail while the background function has time.
+   if (typeof mailbox.indexFolder==='function') await mailIndex({email:user.email,mailbox,force:true,timeBudget:90_000,backfillLimit:1500}).catch(()=>{});
    results.push({email:user.email,status:'ok',sorted:fresh.size,stored,ms:Date.now()-began});
    if (noteSettings.enabled) {
     // data.mail already carries the final categories (keywords, rules and AI), so skipped categories are respected.

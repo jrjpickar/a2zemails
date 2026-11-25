@@ -6,38 +6,39 @@ import {deliveryStatus,deliveryStore,sendIdFor} from '../server/deliveries.mjs';
 import {searchMail} from '../src/model.mjs';
 
 const account='a'.repeat(32);
-const env={GROQ_API_KEY:'g',GEMINI_API_KEY:'m',CLOUDFLARE_ACCOUNT_ID:account,CLOUDFLARE_AI_TOKEN:'cf'};
+const env={GEMINI_API_KEY:'m',CLOUDFLARE_ACCOUNT_ID:account,CLOUDFLARE_API_TOKEN:'cf'};
 const groqOk=text=>Response.json({choices:[{message:{content:text}}]});
 
-test('Cloudflare sits between Groq and Gemini for Ask AI and a Groq 429 benches Groq', async () => {
+test('Cloudflare primary falls back to the fallback model and a 429 benches the primary', async () => {
  resetCooldowns();
  const config=aiConfig(env);
- assert.equal(config.cloudflareModel,'@cf/meta/llama-3.3-70b-instruct-fp8-fast');
+ assert.deepEqual([config.cloudflareModel,config.cloudflareFallback],['@cf/openai/gpt-oss-120b','@cf/openai/gpt-oss-20b']);
  const mailbox={body:async()=>({subject:'Bid',body:'Due Friday'})};
  const calls=[];
- const fetcher=async url=>{
-  calls.push(String(url).includes('groq')?'groq':String(url).includes('cloudflare')?'cloudflare':'gemini');
-  if (String(url).includes('groq')) return new Response(null,{status:429});
-  return groqOk('Friday');
+ const fetcher=async(url,options)=>{
+  const model=JSON.parse(options.body).model;
+  calls.push(model);
+  return model==='@cf/openai/gpt-oss-120b'?new Response(null,{status:429}):groqOk('Friday');
  };
  const first=await askEmail(config,mailbox,{id:'INBOX:1:1',question:'When is it due?'},fetcher);
- assert.deepEqual([first.data.provider,first.data.model],['Cloudflare','@cf/meta/llama-3.3-70b-instruct-fp8-fast']);
- assert.deepEqual(calls,['groq','groq','cloudflare']);
+ assert.deepEqual([first.data.provider,first.data.model],['Cloudflare','@cf/openai/gpt-oss-20b']);
+ assert.deepEqual(calls,['@cf/openai/gpt-oss-120b','@cf/openai/gpt-oss-120b','@cf/openai/gpt-oss-20b']);
  calls.length=0;
  await askEmail(config,mailbox,{id:'INBOX:1:1',question:'When is it due?'},fetcher);
- assert.deepEqual(calls,['cloudflare'],'Groq is benched after a rate limit');
+ assert.deepEqual(calls,['@cf/openai/gpt-oss-20b'],'primary is benched after a rate limit');
  resetCooldowns();
 });
 
-test('bid scans try Cloudflare between Gemini and Groq', async () => {
+test('bid scans try Gemini, then Cloudflare primary, then the fallback model', async () => {
  resetCooldowns();
  const order=[];
- const result=await runAiChain(aiConfig(env),[{role:'user',content:'x'}],{bidScan:true,json:true,fetcher:async url=>{
-  order.push(String(url).includes('googleapis')?'gemini':String(url).includes('cloudflare')?'cloudflare':'groq');
-  return String(url).includes('groq')?groqOk('{"ok":true}'):new Response(null,{status:503});
+ const result=await runAiChain(aiConfig(env),[{role:'user',content:'x'}],{bidScan:true,json:true,fetcher:async (url,options)=>{
+  const model=String(url).includes('googleapis')?'gemini':JSON.parse(options.body).model;
+  order.push(model);
+  return model==='@cf/openai/gpt-oss-20b'?groqOk('{"ok":true}'):new Response(null,{status:503});
  }});
- assert.equal(result.provider,'Groq');
- assert.deepEqual(order.filter((item,index)=>order.indexOf(item)===index),['gemini','cloudflare','groq']);
+ assert.equal(result.model,'@cf/openai/gpt-oss-20b');
+ assert.deepEqual(order.filter((item,index)=>order.indexOf(item)===index),['gemini','@cf/openai/gpt-oss-120b','@cf/openai/gpt-oss-20b']);
  resetCooldowns();
 });
 
@@ -69,12 +70,12 @@ test('Help me write, refine and suggested replies', async () => {
  const bodies=[];
  const fetcher=async(_url,options)=>{bodies.push(JSON.parse(options.body));
   return groqOk(bodies.at(-1).response_format?'{"replies":["Yes, we will bid — thanks.","Please send plans.","We will pass this time."]}':'Hi Terri — we will bid.');};
- const written=await aiWrite(aiConfig({GROQ_API_KEY:'g'}),mailbox,{mode:'write',instruction:'say we will bid',subject:'Re: ITB',body:'',replyToId:'INBOX:1:1'},fetcher);
+ const written=await aiWrite(aiConfig({CLOUDFLARE_ACCOUNT_ID:account,CLOUDFLARE_API_TOKEN:'cf'}),mailbox,{mode:'write',instruction:'say we will bid',subject:'Re: ITB',body:'',replyToId:'INBOX:1:1'},fetcher);
  assert.equal(written.data.body,'Hi Terri - we will bid.','no em dashes');
  assert.match(bodies[0].messages[0].content,/no signature block/);
  assert.equal(JSON.parse(bodies[0].messages[1].content).emailBeingAnswered.subject,'ITB');
- assert.equal((await aiWrite(aiConfig({GROQ_API_KEY:'g'}),mailbox,{mode:'polish',body:''},fetcher)).status,400);
- const replies=await aiReplies(aiConfig({GROQ_API_KEY:'g'}),mailbox,{id:'INBOX:1:1'},fetcher);
+ assert.equal((await aiWrite(aiConfig({CLOUDFLARE_ACCOUNT_ID:account,CLOUDFLARE_API_TOKEN:'cf'}),mailbox,{mode:'polish',body:''},fetcher)).status,400);
+ const replies=await aiReplies(aiConfig({CLOUDFLARE_ACCOUNT_ID:account,CLOUDFLARE_API_TOKEN:'cf'}),mailbox,{id:'INBOX:1:1'},fetcher);
  assert.deepEqual(replies.data.replies,['Yes, we will bid - thanks.','Please send plans.','We will pass this time.']);
 });
 

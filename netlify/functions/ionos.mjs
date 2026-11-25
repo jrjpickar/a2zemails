@@ -2,11 +2,16 @@ import {sealBidScan} from '../../server/bid-scan-session.mjs';
 import {bidImportSettings,bidPreview,bookQualifiedBid,currentQualifiedBids,inspectBidEmail,oneEmailBids,qualifiedBids,qualifiedBidCsv} from '../../server/bid-import.mjs';
 import {dayInCalifornia,readBidReport,readBidScanActivity} from '../../server/bid-leads.mjs';
 import {contactsConfig,searchContacts,mailboxTemperatures,temperatureConfig} from '../../server/ghl-contacts.mjs';
-import {aiConfig,aiEnabled,aiModels,aiReplies,aiWrite,askEmail} from '../../server/ask-ai.mjs';
+import {aiConfig,aiEnabled,aiModels,aiReplies,aiWrite} from '../../server/ask-ai.mjs';
 import {adminConsole,healthChecks} from '../../server/admin-console.mjs';
 import {aiLabelStore,pacificTime,sortHours} from '../../server/ai-sort.mjs';
 import {noteStore,notesConfig} from '../../server/ghl-notes.mjs';
 import {deliveryStatus,deliveryStore,sendIdFor} from '../../server/deliveries.mjs';
+import {askAi,confirmAction,conversationStore} from '../../server/intel/ask.mjs';
+import {intelContext} from '../../server/intel/context.mjs';
+import {runTool} from '../../server/intel/tools.mjs';
+import {llmStatus} from '../../server/intel/llm.mjs';
+import {sharedUsage} from '../../server/intel/usage.mjs';
 import nodemailer from 'nodemailer';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { stagedAttachments, stagedFiles, CHUNK_BYTES, MAX_DOWNLOAD_BYTES, UPLOAD_REQUEST_LIMIT } from '../../server/staged-attachments.mjs';
@@ -81,8 +86,9 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
  const configFor = ({email,password}) => ionosConfig({
   A2Z_MODE:'live', A2Z_ENABLE_LIVE:'true', IONOS_EMAIL:email, IONOS_PASSWORD:password,
   IONOS_SMTP_PORT:env.IONOS_SMTP_PORT,
-  GROQ_API_KEY:env.GROQ_API_KEY,
-  CLOUDFLARE_ACCOUNT_ID:env.CLOUDFLARE_ACCOUNT_ID,CLOUDFLARE_AI_TOKEN:env.CLOUDFLARE_AI_TOKEN,CLOUDFLARE_AI_MODEL:env.CLOUDFLARE_AI_MODEL,
+  CLOUDFLARE_ACCOUNT_ID:env.CLOUDFLARE_ACCOUNT_ID,CLOUDFLARE_API_TOKEN:env.CLOUDFLARE_API_TOKEN,CLOUDFLARE_AI_TOKEN:env.CLOUDFLARE_AI_TOKEN,
+  CLOUDFLARE_AI_MODEL:env.CLOUDFLARE_AI_MODEL,CLOUDFLARE_AI_FALLBACK_MODEL:env.CLOUDFLARE_AI_FALLBACK_MODEL,
+  CLOUDFLARE_DAILY_NEURON_BUDGET:env.CLOUDFLARE_DAILY_NEURON_BUDGET,CLOUDFLARE_NEURON_RATES:env.CLOUDFLARE_NEURON_RATES,
  });
  // Senior admin health checks. Each returns ok, warn or fail with safe detail only (no secrets).
  function healthFor(login) {
@@ -114,22 +120,20 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     const users=await directory.list();
     return {detail:users.length+' mailboxes in the team directory'};
    },
-   'Groq (Ask AI and sorting)':async()=>{
-    if (!ai.groq) return {status:'warn',detail:'GROQ_API_KEY is not set'};
-    const data=await (await timed('https://api.groq.com/openai/v1/models',{headers:{Authorization:'Bearer '+ai.groq}})).json();
-    const model=ai.askGroqModel||aiModels.groq;
-    const found=(data?.data||[]).some(item=>item.id===model);
-    return found?{detail:model+' available. Web search '+(ai.webSearch?'on':'off')}:{status:'warn',detail:model+' is not listed for this key'};
+   'Cloudflare Workers AI':async()=>{
+    // Lists models only. No inference, so the check costs no neurons.
+    if (!ai.cloudflare) return {status:'fail',detail:'Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN. Ask AI, sorting and summaries need it.'};
+    const data=await (await timed('https://api.cloudflare.com/client/v4/accounts/'+ai.cloudflareAccount+'/ai/models/search?search=gpt-oss&per_page=20',
+     {headers:{Authorization:'Bearer '+ai.cloudflare}})).json();
+    const names=(data?.result||[]).map(item=>item.name);
+    const missing=[ai.cloudflareModel,ai.cloudflareFallback].filter(model=>model&&names.length&&!names.includes(model));
+    const usage=await sharedUsage.day();
+    const status=llmStatus(ai.llm);
+    return {status:missing.length||usage.neurons>=ai.llm.budget?'warn':'ok',
+     detail:'Primary '+ai.cloudflareModel+', fallback '+(ai.cloudflareFallback||'none')+(missing.length?'. Not found: '+missing.join(', '):'')+
+      '. Today about '+usage.neurons+' of '+ai.llm.budget+' estimated neurons, '+usage.requests+' requests'+(status.coolingDown.length?'. Rate limited: '+status.coolingDown.join(', '):'')};
    },
-   'Cloudflare Workers AI (backup)':async()=>{
-    if (!ai.cloudflare) return {status:'warn',detail:'Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AI_TOKEN to add the Cloudflare backup'};
-    const response=await timed('https://api.cloudflare.com/client/v4/accounts/'+ai.cloudflareAccount+'/ai/v1/chat/completions',{method:'POST',
-     headers:{Authorization:'Bearer '+ai.cloudflare,'Content-Type':'application/json'},
-     body:JSON.stringify({model:ai.cloudflareModel,max_tokens:1,messages:[{role:'user',content:'ok'}]})});
-    await response.body?.cancel();
-    return {detail:ai.cloudflareModel+' responded'};
-   },
-   'Gemini (Ask AI backup)':async()=>{
+   'Gemini (bid scans and attachment text backup)':async()=>{
     if (!ai.gemini) return {status:'warn',detail:'GEMINI_API_KEY is not set'};
     const model=ai.askModel||aiModels.gemini;
     await timed('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model),{headers:{'x-goog-api-key':ai.gemini}});
@@ -157,7 +161,7 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     return {status,detail:activity.status+(activity.reason?' ('+activity.reason+')':'')+' at '+activity.at};
    },
    'Scheduled AI sorting (9 AM and 3 PM)':async()=>{
-    if (!ai.groq) return {status:'warn',detail:'GROQ_API_KEY is not set'};
+    if (!ai.cloudflare) return {status:'warn',detail:'Cloudflare Workers AI is not configured'};
     const run=await aiLabels.lastRun();
     if (!run) return {status:'warn',detail:'No run yet. Next run at '+(pacificTime().hour<sortHours[0]?'9 AM':pacificTime().hour<sortHours[1]?'3 PM':'9 AM tomorrow')};
     const failed=run.results.filter(item=>item.status==='failed');
@@ -185,6 +189,11 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    'Configuration':async()=>missing.length?{status:'warn',detail:'Missing: '+missing.join(', ')}:
     {detail:allowed.size+' allowed mailboxes, '+admins.size+' senior admin(s)'},
   };
+ }
+ function intelFor(login,mailbox,options={}) {
+  return intelContext({email:login.email,mailbox,env,preferences:{saveDraft:(...args)=>preferencesFactory(login.email).saveDraft(...args)},fetcher,...options,
+   integrations:{searchContacts:contacts?query=>lookupContacts(contacts,query):null,bidReport:()=>readBidReport(login.email)},
+   audit:action=>admin.record(login.email,'ai-action')});
  }
  return async function handler(request) {
   const url = new URL(request.url);
@@ -456,9 +465,47 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     return reply(data,status);
    }
    if (action==='ask-ai' && request.method==='POST') {
-    const {status,data}=await askEmail(ai,mailbox,await readInput(request,96000),fetch,{resilient:true});
+    // Streams Server-Sent Events: status, sources, delta, replace, actions, done or error.
+    const input=await readInput(request,16000);
+    const ctx=intelFor(login,mailbox);
+    const abort=new AbortController();
+    request.signal?.addEventListener?.('abort',()=>abort.abort(),{once:true});
     await admin.record(login.email,'ask-ai');
-    return reply(data,status);
+    const encoder=new TextEncoder();
+    const stream=new ReadableStream({
+     async start(controller) {
+      const send=(event,data)=>{try {controller.enqueue(encoder.encode('event: '+event+'\ndata: '+JSON.stringify(data)+'\n\n'));} catch {}};
+      try {
+       const turn=await askAi({ctx,input,signal:abort.signal,emit:send});
+       send('done',{conversationId:turn.conversationId,sources:turn.sources,actions:turn.actions,model:turn.model,usage:turn.usage,degraded:turn.degraded,content:turn.content,tools:turn.tools});
+      } catch (error) {
+       send('error',{message:error instanceof TypeError||error.code?error.message:'Ask AI could not finish. Try again.',code:error.code||null});
+      } finally {controller.close();}
+     },
+     cancel() {abort.abort();},
+    });
+    return new Response(stream,{headers:{...headers,'Content-Type':'text/event-stream; charset=utf-8','X-Accel-Buffering':'no'}});
+   }
+   if (action==='ai-action' && request.method==='POST') {
+    const input=await readInput(request,2048);
+    const result=await confirmAction({ctx:intelFor(login,mailbox),id:input?.id,decision:input?.decision==='confirm'?'confirm':'cancel'});
+    return reply(result);
+   }
+   if (action==='ai-conversations') {
+    const conversations=conversationStore();
+    if (request.method==='POST') {
+     const input=await readInput(request,512);
+     if (input?.op==='delete') await conversations.remove(login.email,input.id);
+     return reply({items:await conversations.list(login.email)});
+    }
+    const id=url.searchParams.get('id');
+    return reply(id?{conversation:await conversations.get(login.email,id)}:{items:await conversations.list(login.email)});
+   }
+   if (action==='ai-alerts' && request.method==='GET') {
+    // Rules only, no inference.
+    const ctx=intelFor(login,mailbox,{timeBudget:5000});
+    const [alerts,usage]=await Promise.all([runTool(ctx,'email_get_alerts',{}),runTool(ctx,'email_get_ai_usage',{}).catch(()=>null)]);
+    return reply({...alerts,usage,ai:llmStatus(ctx.llm)});
    }
    if (action==='body' && request.method==='POST') {
     const input = await readInput(request,8192);

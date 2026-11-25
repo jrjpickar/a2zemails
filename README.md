@@ -270,3 +270,21 @@ Set the same variables the A2Z MCP uses in Netlify Production → Functions: `CL
 - Ask AI reads PDF and image attachments of the open email (Gemini), summarizes the whole thread, and catches you up on unread mail. Answers about an open email have **Use in reply**.
 - Compose has **Help me write** (draft from a prompt, including replies with the original email as context), Polish, Formal, Friendlier, Shorter, Elaborate, Proofread and Translate, with Undo.
 - The reader offers **Suggest replies**: three short replies that open in Compose.
+
+## Ask AI command center and MCP server (Cloudflare Workers AI)
+
+Groq is removed. Ask AI, sorting, CRM summaries and writing help use Cloudflare Workers AI only (Gemini stays only for bid scans and as a backup for reading attachment text).
+
+| Variable | Purpose |
+| --- | --- |
+| `CLOUDFLARE_ACCOUNT_ID` | 32 character account ID |
+| `CLOUDFLARE_API_TOKEN` | Workers AI permission (Account Analytics read is optional, for provider-reported neurons). `CLOUDFLARE_AI_TOKEN` still works. |
+| `CLOUDFLARE_AI_MODEL` | Optional. Default `@cf/openai/gpt-oss-120b` |
+| `CLOUDFLARE_AI_FALLBACK_MODEL` | Optional. Default `@cf/openai/gpt-oss-20b` |
+| `CLOUDFLARE_DAILY_NEURON_BUDGET` | Optional. Default 9000 (free allowance is 10,000 per day). Background jobs stop at 70%. |
+| `MCP_API_KEY` | 32+ characters. Read access to `/mcp` and `/api/mcp/email-metrics` |
+| `MCP_READ_ONLY` | Default `true`. Set `false` together with `MCP_WRITE_API_KEY` to allow `email_create_draft` |
+| `MCP_WRITE_API_KEY` | Optional separate key for draft creation |
+| `MCP_IONOS_EMAIL` | Mailbox the MCP server reads (password from `MCP_IONOS_PASSWORD`, `GHL_IONOS_MAILBOX_PASSWORDS` or Team access) |
+
+How it works: a mailbox index (Netlify Blobs, `mail-index`) is synced incrementally by IMAP UID and backfilled at the 9 AM and 3 PM runs. Searching, filtering, counting, dates and metrics run in code over that index. Ask AI routes common questions to tools in code, asks the model to plan only when needed, then streams an answer that cites emails as [1], [2]. Actions (drafts, mark read, star, archive, reminders) show a preview and run only after Confirm, once. MCP: `POST https://<site>/mcp` with `Authorization: Bearer <MCP_API_KEY>`. Metrics: `GET https://<site>/api/mcp/email-metrics?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD`.

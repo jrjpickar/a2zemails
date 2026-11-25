@@ -14,7 +14,7 @@ function stores() {
  };
 }
 
-const env={GHL_CONVERSATIONS_PIT_TOKEN:'write-token',GHL_CONTACTS_PIT_TOKEN:'read-token',GHL_CONTACTS_LOCATION_ID:'loc1',GROQ_API_KEY:'groq'};
+const env={GHL_CONVERSATIONS_PIT_TOKEN:'write-token',GHL_CONTACTS_PIT_TOKEN:'read-token',GHL_CONTACTS_LOCATION_ID:'loc1',CLOUDFLARE_ACCOUNT_ID:'e'.repeat(32),CLOUDFLARE_API_TOKEN:'cf'};
 const now=Date.parse('2026-11-24T23:00:00Z');
 const mail=[
  {id:'INBOX:1:10',folder:'Inbox',category:'Bid Invitations',subject:'ITB Fleming\'s',from:'Ryan <ryan@rescon.example>',to:'artjr@a2zcs.net',cc:'',
@@ -30,7 +30,7 @@ function fakeGhl(calls,savedAs='TYPE_INTERNAL_COMMENT') {
  return async (url,options={})=>{
   const body=options.body?JSON.parse(options.body):null;
   calls.push({url:String(url),method:options.method||'GET',auth:options.headers?.Authorization,body});
-  if (url.includes('api.groq.com')) {
+  if (url.includes('/ai/v1/chat/completions')) {
    const items=JSON.parse(body.messages[1].content);
    return Response.json({choices:[{message:{content:JSON.stringify({results:items.map(item=>({index:item.index,summary:'Summary of '+item.subject+'. '+(item.text.match(/\$[\d,]+/)?.[0]||'')}))})}}]});
   }

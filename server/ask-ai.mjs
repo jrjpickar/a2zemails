@@ -1,5 +1,7 @@
 import {setTimeout as delay} from 'node:timers/promises';
 import {askAiPrompt} from './ask-ai-prompt.mjs';
+import {llmConfig,defaultModel,estimateNeurons,estimateTokens} from './intel/llm.mjs';
+import {sharedUsage} from './intel/usage.mjs';
 import {currentMessageText} from '../src/model.mjs';
 // Quoted history repeats what other excerpts already show; drop it to save tokens.
 const currentText=body=>{const current=currentMessageText(body).trim();return (current.length>80?current:body).slice(0,4000);};
@@ -19,32 +21,29 @@ const temperature = 0.3;
 const maxTokens = 4096;
 
 export function aiConfig(env) {
- return {gemini:env.GEMINI_API_KEY?.trim(),groq:env.GROQ_API_KEY?.trim(),
-  // Optional: a stronger Gemini model for Ask AI only, such as a Pro model. Bid scans keep the fast default.
+ return {gemini:env.GEMINI_API_KEY?.trim(),
+  // Optional: a stronger Gemini model for bid scans and attachment reading.
   askModel:/^[a-z0-9.\-]{3,80}$/i.test(env.ASK_AI_GEMINI_MODEL?.trim()||'')?env.ASK_AI_GEMINI_MODEL.trim():undefined,
-  // Same Groq reasoning model as the A2Z MCP (GROQ_MODEL default openai/gpt-oss-120b), with Groq browser search.
-  askGroqModel:/^openai\/gpt-oss-(?:20b|120b)$/.test(env.ASK_AI_GROQ_MODEL?.trim()||'')?env.ASK_AI_GROQ_MODEL.trim():'openai/gpt-oss-120b',
-  webSearch:env.ASK_AI_WEB_SEARCH?.trim()!=='0',
-  // Cloudflare Workers AI backup, same variables as the A2Z MCP.
+  webSearch:false,
+  // Cloudflare Workers AI replaces Groq: CLOUDFLARE_AI_MODEL primary, CLOUDFLARE_AI_FALLBACK_MODEL fallback.
   ...cloudflareSettings(env)};
 }
 
 export function cloudflareSettings(env) {
- const account=env.CLOUDFLARE_ACCOUNT_ID?.trim(), token=env.CLOUDFLARE_AI_TOKEN?.trim();
- if (!account||!token||!/^[a-f0-9]{32}$/i.test(account)) return {};
- const model=env.CLOUDFLARE_AI_MODEL?.trim();
- return {cloudflare:token,cloudflareAccount:account,cloudflareModel:/^@cf\/[a-z0-9._\/-]{3,100}$/i.test(model||'')?model:cloudflareDefault};
+ const config=llmConfig(env||{});
+ if (!config) return {};
+ return {cloudflare:config.token,cloudflareAccount:config.account,cloudflareModel:config.model,cloudflareFallback:config.fallback,llm:config};
 }
-export const cloudflareDefault='@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+export const cloudflareDefault=defaultModel;
 
 // Rate-limited providers sit out briefly for every request in this function instance, so later calls go straight to the next provider.
 const sharedCooldowns=new Map();
 export function resetCooldowns() {sharedCooldowns.clear();}
 
-export const aiModels={gemini:'gemini-3.8-flash',groq:'openai/gpt-oss-120b'};
+export const aiModels={gemini:'gemini-3.8-flash',cloudflare:defaultModel};
 
 export function aiEnabled(config) {
- return Boolean(config.gemini||config.groq||config.cloudflare);
+ return Boolean(config.gemini||config.cloudflare);
 }
 
 const providers = [
@@ -71,31 +70,16 @@ const providers = [
     {reason:'malformed_response'};
   },
  },
- {
-  key:'groq',name:'Groq',model:'openai/gpt-oss-120b',
-  url:'https://api.groq.com/openai/v1/chat/completions',
-  headers:key=>({Authorization:'Bearer '+key}),
-  payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false,schema,model:settingsModel,reasoning=false,tokens=maxTokens,webSearch=false})=>({
-   model:settingsModel||'openai/gpt-oss-120b',reasoning_effort:reasoning&&/gpt-oss/.test(settingsModel||'gpt-oss')?(reasoning==='high'?'high':'medium'):'low',temperature:temp,max_completion_tokens:tokens,
-   ...(json?{response_format:schema?{type:'json_schema',json_schema:{name:'bid_invites',strict:true,schema}}:{type:'json_object'}}:{}),
-   ...(webSearch&&/gpt-oss/.test(settingsModel||'gpt-oss')?{tools:[{type:'browser_search'}],tool_choice:'auto'}:{}),
-   messages:[{role:'system',content:prompt},...messages],
-  }),
-  answer(data) {
-   const choice=data?.choices?.[0];
-   if (choice?.finish_reason==='content_filter'||choice?.message?.refusal) return {reason:'safety_block'};
-   const text=choice?.message?.content;
-   return typeof text==='string' ? {text} : {reason:'malformed_response'};
-  },
- },
+
 ];
 
 const cloudflare={
  key:'cloudflare',name:'Cloudflare',model:cloudflareDefault,
  urlFor:config=>'https://api.cloudflare.com/client/v4/accounts/'+config.cloudflareAccount+'/ai/v1/chat/completions',
  headers:key=>({Authorization:'Bearer '+key}),
- payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false,tokens=maxTokens,model})=>({
+ payload:(messages,{prompt=askAiPrompt,temp=temperature,json=false,tokens=maxTokens,model,reasoning=false})=>({
   model,temperature:temp,max_tokens:Math.min(tokens,4096),
+  ...(reasoning&&/gpt-oss/.test(model||'')?{reasoning_effort:reasoning==='high'?'high':reasoning==='medium'?'medium':'low'}:{}),
   ...(json?{response_format:{type:'json_object'}}:{}),
   messages:[{role:'system',content:prompt+(json?'\nReturn only valid JSON.':'')},...messages],
  }),
@@ -104,21 +88,21 @@ const cloudflare={
   return typeof text==='string' ? {text:text.replace(/^```(?:json)?\s*|\s*```$/g,'')} : {reason:'malformed_response'};
  },
 };
-providers.splice(1,0,cloudflare);
-
-const groq=providers[2];
+// Groq is removed. Cloudflare primary and fallback models replace it everywhere.
+providers.splice(1,providers.length-1,cloudflare,{...cloudflare,fallback:true});
+const cloudflareFallback=providers[2];
 const bidProviders=[
  {...providers[0],timeout:11000},
- {...cloudflare,timeout:12000},
- {...groq,timeout:8500},
- {...groq,model:'openai/gpt-oss-20b',timeout:7500,optional:true},
- {...groq,model:'qwen/qwen3.8-27b',timeout:7500,optional:true},
+ {...cloudflare,timeout:14000},
+ {...cloudflareFallback,timeout:10000},
 ];
 
 function cleanAnswer(text) {
  return text.replace(/<(think|thinking|analysis)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi,'').trim()
   .replace(/^(?:as an ai(?: language model| assistant)?)[,:]\s*/i,'').trim();
 }
+
+const modelFor=(provider,config)=>provider.key==='cloudflare'?(provider.fallback?config.cloudflareFallback:config.cloudflareModel)||provider.model:provider.model;
 
 async function attempt(provider,key,messages,signal,fetcher,settings) {
  let response;
@@ -127,8 +111,7 @@ async function attempt(provider,key,messages,signal,fetcher,settings) {
  try {
   response=await fetcher(url,{
    method:'POST',headers:{'Content-Type':'application/json',...provider.headers(key)},
-   body:JSON.stringify(provider.payload(messages,{...settings,model:provider.key==='cloudflare'?settings.config?.cloudflareModel||provider.model:
-    settings.groqModel&&provider.key==='groq'&&!provider.optional?settings.groqModel:provider.model})),signal,
+   body:JSON.stringify(provider.payload(messages,{...settings,model:modelFor(provider,settings.config||{})})),signal,
   });
  } catch (error) {
   return {reason:signal.aborted||error?.name==='TimeoutError'?'timeout':'network_error'};
@@ -164,13 +147,10 @@ async function runProvider(provider,key,messages,budget,fetcher,settings) {
  return attempt(provider,key,messages,signal,fetcher,settings);
 }
 
-// Ask AI chain: the MCP's Groq reasoning model with web search first, Gemini with Google Search grounding second,
-// then the small Groq model for outages.
+// Writing help and suggested replies: Cloudflare primary, then the fallback model.
 const askProviders=[
- {...groq,timeout:25000},
- {...cloudflare,timeout:20000},
- {...providers[0],timeout:20000},
- {...groq,model:'openai/gpt-oss-20b',timeout:9000,optional:true},
+ {...cloudflare,timeout:25000},
+ {...cloudflareFallback,timeout:15000},
 ];
 
 export async function runAiChain(config,messages,{budget=AbortSignal.timeout(totalTimeout),fetcher=fetch,attempts=[],bidScan=false,rotateGroq=false,cooldowns,chain,...settings}={}) {
@@ -184,18 +164,26 @@ export async function runAiChain(config,messages,{budget=AbortSignal.timeout(tot
    continue;
   }
   if (budget.aborted) break;
-  if ((resting.get(provider.key+'|'+provider.model)||0)>Date.now()) {
+  if ((resting.get(provider.key+'|'+modelFor(provider,config))||0)>Date.now()) {
    fallbackReason??='provider_cooling_down';
    continue;
   }
+  const model=modelFor(provider,config);
+  if (provider.key==='cloudflare'&&!model) continue;
+  if (provider.key==='cloudflare'&&config.llm&&(await sharedUsage.day()).neurons>=config.llm.budget*(settings.budgetShare||1)) {
+   fallbackReason??='ai_quota';
+   continue;
+  }
   const result=await runProvider(provider,key,messages,budget,fetcher,{...settings,config});
-  const model=provider.key==='cloudflare'?config.cloudflareModel||provider.model:
-   settings.groqModel&&provider.key==='groq'&&!provider.optional?settings.groqModel:provider.model;
+  if (provider.key==='cloudflare') {
+   const input=estimateTokens(JSON.stringify(messages)), output=estimateTokens(result.answer===undefined?'':JSON.stringify(result.answer));
+   await sharedUsage.add({model,feature:settings.feature||'other',input,output,neurons:result.answer===undefined?0:estimateNeurons(config.llm,model,input,output),failed:result.answer===undefined}).catch(()=>{});
+  }
   if (result.answer!==undefined) return {...result,provider:provider.name,model,fallbackReason};
   attempts.push({provider:provider.name,model,reason:result.reason});
   // A rate limit benches that model for 30 s across requests; scans also bench on timeouts and outages.
   if (result.reason==='http_429'||(!shared&&(result.reason==='timeout'||/^http_5/.test(result.reason)))) {
-   resting.set(provider.key+'|'+provider.model,Date.now()+(result.reason==='http_429'?30000:10000));
+   resting.set(provider.key+'|'+model,Date.now()+(result.reason==='http_429'?30000:10000));
   }
   if (result.stop) return {...result,fallbackReason};
   fallbackReason??=result.reason;
@@ -248,7 +236,7 @@ export async function askEmail(config,mailbox,input,fetcher=fetch,{resilient=fal
   // Attachments: Gemini reads PDFs and images directly, so it goes first; the others answer from the text.
   const chain=files?.length?[{...providers[0],timeout:30000},...askProviders.filter(provider=>provider.key!=='gemini')]:askProviders;
   const result=await runAiChain(config,messages,{budget,fetcher,attempts,chain,files:files||[],
-   reasoning:reasoningFor(question),tokens:askTokens,geminiModel:config.askModel,groqModel:config.askGroqModel,webSearch:config.webSearch!==false});
+   reasoning:reasoningFor(question),tokens:askTokens,geminiModel:config.askModel,webSearch:config.webSearch!==false});
   answeredBy=result.provider;
   fallbackReason=result.fallbackReason;
   if (result.provider) return {status:200,data:{answer:result.answer,provider:result.provider,model:result.model,
@@ -360,7 +348,7 @@ export async function aiWrite(config,mailbox,input,fetcher=fetch) {
  const original=input.replyToId&&typeof input.replyToId==='string'?await mailbox.body(input.replyToId,{includeHtml:false,includeImages:false,includeSubject:true}).catch(()=>null):null;
  const result=await runAiChain(config,[{role:'user',content:JSON.stringify({task:writeModes[mode],instruction,subject:String(input.subject||'').slice(0,500),draft,
   ...(original?{emailBeingAnswered:{subject:original.subject,text:currentText(original.body||'')}}:{}),today:todayInPacific()})}],
-  {fetcher,chain:askProviders,prompt:writePrompt,reasoning:'medium',tokens:4096,groqModel:config.askGroqModel,webSearch:false,temp:0.4});
+  {fetcher,chain:askProviders,prompt:writePrompt,reasoning:'medium',tokens:4096,webSearch:false,temp:0.4});
  if (!result.provider) return {status:502,data:{error:'AI writing is temporarily unavailable. Try again.'}};
  return {status:200,data:{body:result.answer.replace(/[\u2013\u2014]/g,'-').trim(),provider:result.provider,model:result.model}};
 }
@@ -372,7 +360,7 @@ export async function aiReplies(config,mailbox,input,fetcher=fetch) {
  if (!message) return {status:404,data:{error:'This email is no longer available.'}};
  const result=await runAiChain(config,[{role:'user',content:JSON.stringify({subject:message.subject,text:currentText(message.body||''),today:todayInPacific()})}],
   {fetcher,chain:askProviders,prompt:writePrompt+'\nSuggest three different short replies (one to three sentences each) the A2Z user could send. Return JSON {"replies":["...","...","..."]}.',
-   json:true,reasoning:'medium',tokens:1500,groqModel:config.askGroqModel,webSearch:false,temp:0.5,
+   json:true,reasoning:'medium',tokens:1500,webSearch:false,temp:0.5,
    validate:text=>{const replies=JSON.parse(text).replies;if(!Array.isArray(replies)||!replies.length)throw new Error('bad');return replies.filter(item=>typeof item==='string').slice(0,3).map(item=>item.replace(/[\u2013\u2014]/g,'-').trim());}});
  if (!result.provider) return {status:502,data:{error:'Suggested replies are temporarily unavailable.'}};
  return {status:200,data:{replies:result.answer}};

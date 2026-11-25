@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {askEmail,resetCooldowns} from '../server/ask-ai.mjs';
+import {aiConfig,askEmail,resetCooldowns} from '../server/ask-ai.mjs';
 import {askAiPrompt} from '../server/ask-ai-prompt.mjs';
 import {mailboxTemperatures,temperatureConfig} from '../server/ghl-contacts.mjs';
 import {createHostedHandler} from '../netlify/functions/ionos.mjs';
@@ -12,99 +12,44 @@ const mailbox={async body(id,options) {
  return {subject:'Demo bid',body:'Bid due Friday.',html:'<img src="external">',images:{fixture:'attachment'}};
 }};
 
-test('Ask AI uses the MCP Groq reasoning model with web search first and falls back to Gemini',async ()=>{
- const config={gemini:'fake-gemini',groq:'fake-groq',askGroqModel:'openai/gpt-oss-120b',webSearch:true};
+const cf={...aiConfig({CLOUDFLARE_ACCOUNT_ID:'f'.repeat(32),CLOUDFLARE_API_TOKEN:'fake-cf'})};
+const cfReply=text=>Response.json({choices:[{message:{content:text}}]});
+
+test('Local-mode Ask AI uses the Cloudflare primary model, then the fallback model',async ()=>{
  for (const failure of ['none','http','timeout','empty']) {
   resetCooldowns();
-  const calls=[];
-  const result=await askEmail(config,mailbox,question,async (url,options)=>{
-   calls.push(url);
+  const models=[];
+  const result=await askEmail(cf,mailbox,question,async (url,options)=>{
+   assert.match(url,/api\.cloudflare\.com\/client\/v4\/accounts\/f{32}\/ai\/v1\/chat\/completions/);
+   assert.equal(options.headers.Authorization,'Bearer fake-cf');
    const body=JSON.parse(options.body);
-   if (url.includes('groq.com')) {
-    assert.equal(options.headers.Authorization,'Bearer '+config.groq);
-    assert.equal(body.model,'openai/gpt-oss-120b');
-    assert.equal(body.reasoning_effort,'medium','quick lookup uses medium reasoning');
-    assert.deepEqual(body.tools,[{type:'browser_search'}]);
-    const {today,...context}=JSON.parse(body.messages.at(-1).content);
-    assert.match(today,/\d{4}/);
-    assert.deepEqual(context,{question:question.question,subject:'Demo bid',email:'Bid due Friday.',excerptIncomplete:false});
-    if (failure==='http') return new Response(null,{status:429});
-    if (failure==='timeout') throw new DOMException('Timeout','TimeoutError');
-    return Response.json(failure==='empty'?{}:{choices:[{message:{content:'Friday'}}]});
-   }
-   assert.equal(options.headers['x-goog-api-key'],config.gemini);
-   assert.deepEqual(body.tools,[{google_search:{}}]);
-   assert.equal(body.generationConfig.thinkingConfig.thinkingLevel,'low');
-   return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{thought:true,text:'Private'},{text:'Friday'}]}}]});
+   models.push(body.model);
+   assert.equal(body.messages[0].content,askAiPrompt);
+   const {today,...context}=JSON.parse(body.messages.at(-1).content);
+   assert.match(today,/\d{4}/);
+   assert.deepEqual(context,{question:question.question,subject:'Demo bid',email:'Bid due Friday.',excerptIncomplete:false});
+   if (body.model==='@cf/openai/gpt-oss-20b'||failure==='none') return cfReply('Friday');
+   if (failure==='http') return new Response(null,{status:429});
+   if (failure==='timeout') throw new DOMException('Timeout','TimeoutError');
+   return Response.json({});
   });
-  assert.deepEqual(result,{status:200,data:{answer:'Friday',provider:failure==='none'?'Groq':'Gemini',
-   model:failure==='none'?'openai/gpt-oss-120b':'gemini-3.8-flash',backup:failure!=='none'}});
-  assert.equal(calls.length,{none:1,http:3,timeout:2,empty:2}[failure]);
+  assert.equal(result.status,200);
+  assert.equal(result.data.answer,'Friday');
+  assert.equal(result.data.model,failure==='none'?'@cf/openai/gpt-oss-120b':'@cf/openai/gpt-oss-20b');
+  assert.equal(models.at(-1),failure==='none'?'@cf/openai/gpt-oss-120b':'@cf/openai/gpt-oss-20b');
  }
- assert.equal((await askEmail(config,{body:async()=>null},question,()=>assert.fail('Provider called'))).status,404);
-});
-
-test('Groq retries 503 once before Gemini and both receive the same prompt, settings and history',async ()=>{
- resetCooldowns();
- const requests=[];
- const history=[{role:'user',content:'What is this?'},{role:'assistant',content:'A demo bid.'}];
- const result=await askEmail({gemini:'fake',groq:'fake'},mailbox,{...question,history},async (url,options)=>{
-  const payload=JSON.parse(options.body);
-  requests.push(payload);
-  if (url.includes('groq.com')) return new Response(null,{status:503});
-  return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:'Friday'}]}}]});
- });
- assert.deepEqual(result,{status:200,data:{answer:'Friday',provider:'Gemini',model:'gemini-3.8-flash',backup:true}});
- assert.equal(requests.length,3);
- assert.deepEqual(requests[0],requests[1]);
- const [groq,,gemini]=requests;
- assert.equal(gemini.systemInstruction.parts[0].text,askAiPrompt);
- assert.deepEqual(groq.messages[0],{role:'system',content:askAiPrompt});
- assert.deepEqual(gemini.contents.map(({role,parts})=>({
-  role:role==='model'?'assistant':role,content:parts[0].text,
- })),groq.messages.slice(1));
- assert.equal(gemini.generationConfig.temperature,groq.temperature);
- assert.equal(gemini.generationConfig.maxOutputTokens,groq.max_completion_tokens);
- assert.equal(groq.reasoning_effort,'medium');
-});
-
-test('Ask AI drops reasoning and web search settings once when a provider rejects them',async ()=>{
- const bodies=[];
- const result=await askEmail({groq:'fake',webSearch:true},mailbox,question,async (_url,options)=>{
-  const body=JSON.parse(options.body);
-  bodies.push(body);
-  return body.tools?new Response(null,{status:400}):Response.json({choices:[{message:{content:'Friday'}}]});
- });
- assert.equal(result.data.answer,'Friday');
- assert.equal(bodies[1].tools,undefined);
- assert.equal(bodies[1].reasoning_effort,'low');
+ assert.equal((await askEmail(cf,{body:async()=>null},question,()=>assert.fail('Provider called'))).status,404);
 });
 
 test('Provider request and authentication errors stop fallback',async ()=>{
- for (const status of [400,401,403]) {
+ for (const status of [401,403]) {
+  resetCooldowns();
   let count=0;
-  const result=await askEmail({gemini:'fake',groq:'fake'},mailbox,question,async ()=>{
-   count++;
-   return new Response('private provider response',{status});
-  });
-  // A 400 retries once without reasoning settings, then stops.
-  assert.equal(count,status===400?2:1);
+  const result=await askEmail(cf,mailbox,question,async ()=>{count++;return new Response('private provider response',{status});});
+  assert.equal(count,1);
   assert.equal(result.status,502);
-  assert.match(result.data.error,status===400?/submit/:/authenticate/);
+  assert.match(result.data.error,/authenticate/);
   assert.doesNotMatch(result.data.error,/private provider response/);
- }
-});
-
-test('Timeouts, malformed results and non-STOP Gemini responses use the next provider',async ()=>{
- for (const failure of ['timeout','malformed','safety','incomplete']) {
-  const result=await askEmail({gemini:'fake',groq:'fake'},mailbox,question,async url=>{
-   if (!url.includes('googleapis.com')) throw new TypeError('private network detail');
-   if (failure==='timeout') throw new DOMException('private timeout detail','TimeoutError');
-   if (failure==='malformed') return new Response('broken JSON');
-   return Response.json({candidates:[{finishReason:failure==='safety'?'SAFETY':'MAX_TOKENS',
-    content:{parts:[{text:'Discard this'}]}}]});
-  });
-  assert.deepEqual(result,{status:502,data:{error:'Ask AI is temporarily unavailable. Try again.'}});
  }
 });
 
@@ -172,9 +117,9 @@ test('Ask AI saves work: deep reasoning only for analysis and no mailbox search 
  assert.equal(needsMailboxSearch('When is it due?',true),false);
  assert.equal(needsMailboxSearch('Did we bid this GC before?',true),true);
  assert.equal(needsMailboxSearch('When is it due?',false),true);
+ resetCooldowns();
  let searched=false;
- const result=await askEmail({groq:'fake'},{...mailbox,mailSearch:async()=>{searched=true;return {mail:[]};}},question,
-  async()=>Response.json({choices:[{message:{content:'Friday'}}]}));
+ const result=await askEmail(cf,{...mailbox,mailSearch:async()=>{searched=true;return {mail:[]};}},question,async()=>cfReply('Friday'));
  assert.equal(result.data.answer,'Friday');
  assert.equal(searched,false);
 });

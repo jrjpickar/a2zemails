@@ -12,7 +12,7 @@ const keywordCacheMs = 30_000;
 const activityDays = 30;
 const lastSeenThrottleMs = 10 * 60 * 1000;
 
-export const activityActions = ['sign-in','sign-in-failed','ghl-sign-in','open','send','ask-ai','export','bid-scan','team','keywords','settings','error'];
+export const activityActions = ['sign-in','sign-in-failed','ghl-sign-in','open','send','ask-ai','export','bid-scan','team','keywords','settings','ai-action','mcp','error'];
 
 const day = time => new Date(time).toISOString().slice(0,10);
 const encode = value => Buffer.from(String(value||'')).toString('base64url');

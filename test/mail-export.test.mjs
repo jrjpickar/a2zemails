@@ -46,21 +46,22 @@ test('Live export pages past the recent window and uses read-only folders',async
  assert.deepEqual(last.next,[]);
 });
 
-test('Resilient Ask AI tries Groq after Gemini and returns local evidence if every provider times out',async ()=>{
+test('Resilient Ask AI falls back to the Cloudflare fallback model and returns local evidence if every model times out',async ()=>{
+ const {aiConfig,resetCooldowns}=await import('../server/ask-ai.mjs');
+ resetCooldowns();
  const mailbox={body:async()=>({subject:'Fixture',body:'Bid due Tuesday.'}),send:()=>assert.fail('Ask AI sent email')};
- const config={gemini:'fixture',groq:'fixture'};
+ const config=aiConfig({CLOUDFLARE_ACCOUNT_ID:'9'.repeat(32),CLOUDFLARE_API_TOKEN:'fixture'});
  const request={id:'INBOX:1:1',question:'When is it due?'};
  const models=[];
  const response=await askEmail(config,mailbox,request,async (url,options)=>{
-  if (url.includes('googleapis')) throw new DOMException('fixture','TimeoutError');
   const payload=JSON.parse(options.body);
-  assert.deepEqual(payload.tools,[{type:'browser_search'}]);
   models.push(payload.model);
   if (models.length===1) throw new DOMException('fixture','TimeoutError');
   return Response.json({choices:[{message:{content:'Tuesday.'}}]});
  },{resilient:true});
- assert.equal(response.data.provider,'Groq');
- assert.deepEqual(models,['openai/gpt-oss-120b','openai/gpt-oss-20b']);
+ assert.equal(response.data.provider,'Cloudflare');
+ assert.deepEqual(models,['@cf/openai/gpt-oss-120b','@cf/openai/gpt-oss-20b']);
+ resetCooldowns();
  const fallback=await askEmail(config,mailbox,request,async()=>{throw new DOMException('fixture','TimeoutError');},{resilient:true});
  assert.equal(fallback.data.excerptsOnly,true);
  assert.match(fallback.data.answer,/Bid due Tuesday/);
