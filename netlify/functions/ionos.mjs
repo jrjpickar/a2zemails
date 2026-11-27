@@ -27,6 +27,9 @@ import { seniorAdmins, teamDirectory } from '../../server/team-directory.mjs';
 const mailboxSignInError = 'Could not sign in. Use your full IONOS mailbox address and mailbox password. A2Z must also enable the mailbox for direct sign-in.';
 const lifetime = 2 * 60 * 60 * 1000;
 const rememberedSeconds = 7 * 24 * 60 * 60;
+// Chrome caps cookie lifetime at 400 days. Device sessions renew on app open, so they never lapse in use.
+const deviceSeconds = 400 * 24 * 60 * 60;
+const deviceRenewAfter = 24 * 60 * 60 * 1000;
 const rememberedCookie = '__Host-a2z-mail';
 const cookieAuthorization = 'MailboxCookie';
 const sessionCookie = (value, age) =>
@@ -224,9 +227,11 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
     catch (error) { await admin.record(email,'sign-in-failed'); throw error; }
     finally { client.close(); }
     await admin.record(email,'sign-in');
-    if (input.remember===true) {
-     const token=encrypt(key,{email,password},rememberedSeconds*1000);
-     if (token.length<=3800) return reply({token:cookieAuthorization,email},200,sessionCookie(token,rememberedSeconds));
+    if (input.remember===true||input.remember==='device') {
+     const device=input.remember==='device';
+     const seconds=device?deviceSeconds:rememberedSeconds;
+     const token=encrypt(key,device?{email,password,device:true}:{email,password},seconds*1000);
+     if (token.length<=3800) return reply({token:cookieAuthorization,email},200,sessionCookie(token,seconds));
     }
     return reply({token:encrypt(key,{email,password}),email},200,sessionCookie('',0));
    }
@@ -255,7 +260,11 @@ export function createHostedHandler(env, {Imap=ImapFlow, mailboxFactory=createIo
    },401,usesCookie?sessionCookie('',0):undefined);
    const profile = {email:login.email,admin:access.admin,
     name:access.namedByAdmin?access.name:(session.highLevel?.name||access.name)};
-   if (usesCookie && action==='session' && request.method==='GET') return reply({email:login.email,profile});
+   if (usesCookie && action==='session' && request.method==='GET') {
+    const renew=session.device===true && Date.now()-session.issued>=deviceRenewAfter;
+    const token=renew?encrypt(key,{email:session.email,password:session.password,device:true},deviceSeconds*1000):'';
+    return reply({email:login.email,profile},200,renew&&token.length<=3800?sessionCookie(token,deviceSeconds):undefined);
+   }
    if (action==='profile' && request.method==='GET') return reply({profile});
    if (action==='mail-inbox' && request.method==='GET') {
     mailStage='inbox-summary';

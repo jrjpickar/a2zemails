@@ -293,6 +293,22 @@ test('hosted mailbox login requires an allowed address and an authenticated unmo
  const logout=await call('logout',{cookie,token:remembered,body:{}});
  assert.match(logout.headers.get('set-cookie'),/^__Host-a2z-mail=; Max-Age=0;/);
  assert.equal((await call('session',{token:remembered})).status,401);
+ const device=await call('login',{body:{email:env.IONOS_EMAIL,password:env.IONOS_PASSWORD,remember:'device'}});
+ assert.equal((await device.json()).token,'MailboxCookie');
+ assert.match(device.headers.get('set-cookie'),/Max-Age=34560000; Path=\/; Secure; HttpOnly; SameSite=Strict/);
+ const deviceCookie=device.headers.get('set-cookie').split(';')[0];
+ const fresh=await call('session',{cookie:deviceCookie,token:remembered});
+ assert.equal(fresh.status,200);
+ assert.equal(fresh.headers.get('set-cookie'),null);
+ const realNow=Date.now;
+ Date.now=()=>realNow()+2*86400000;
+ try {
+  const renewed=await call('session',{cookie:deviceCookie,token:remembered});
+  assert.equal(renewed.status,200);
+  assert.match(renewed.headers.get('set-cookie'),/^__Host-a2z-mail=[A-Za-z0-9_-]+; Max-Age=34560000;/);
+  const old=await call('session',{cookie:saved.headers.get('set-cookie').split(';')[0],token:remembered});
+  assert.equal(old.headers.get('set-cookie')?.includes('Max-Age=34560000')??false,false);
+ } finally { Date.now=realNow; }
 });
 
 test('Trash creates a retained folder and permanent deletion targets only a Trash UID', async () => {

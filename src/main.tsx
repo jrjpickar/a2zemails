@@ -12,12 +12,18 @@ import {AttachmentPreview,type AttachmentSource,type MailAttachment,type Forward
 import {useComposePosition} from './compose-position';
 import {MessageText} from './message-text';
 import {AskAi,type AskRunner,type AskSource} from './ask-ai';
-import {BidImportReport} from './bid-import-report';
 import {RecipientInput,type Contact} from './recipient-input';
-import {AdminConsole} from './admin-console';
 import {rememberedSession,hostedRequest,hostedStream,MailboxLogin,requestHighLevelContext,highLevelSignInNotice} from './hosted';
 import './style.css';
 import './theme.css';
+// Panels most people rarely open load on demand. A failed chunk (offline, or a deploy since the app opened) shows a notice instead of a blank screen.
+const panelImports={admin:()=>import('./admin-console'),bids:()=>import('./bid-import-report')};
+function lazyPanel<P extends object>(load:()=>Promise<React.ComponentType<P>>) {
+ return React.lazy(()=>load().then(component=>({default:component}),()=>({default:(()=><div className="empty" role="alert">This panel could not load. Check your connection, then reload the app.</div>) as React.ComponentType<P>})));
+}
+const AdminConsole=lazyPanel(()=>panelImports.admin().then(module=>module.AdminConsole));
+const BidImportReport=lazyPanel(()=>panelImports.bids().then(module=>module.BidImportReport));
+const resumeRefreshGap=60000;
 const temperatures=[['cold','Cold'],['warm','Warm'],['hot','Hot'],['vip','VIP']] as const;
 type Temperature=typeof temperatures[number][0];
 type SearchCursor={path:string;before:number|null;generation:string|null};
@@ -292,6 +298,35 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  useEffect(()=>{
   if (!liveToken) return;
   void refreshMailbox('Inbox').then(()=>{if (hosted) void refreshFolderList();});
+ },[]);
+ // Home screen apps stay open for days. Refresh when the app comes back to the front or reconnects.
+ const lastResumeRefresh=React.useRef(Date.now());
+ const resumeRefresh=React.useRef((_force:boolean)=>{});
+ resumeRefresh.current=force=>{
+  if (document.visibilityState!=='visible'||!navigator.onLine) return;
+  if (!force&&Date.now()-lastResumeRefresh.current<resumeRefreshGap) return;
+  lastResumeRefresh.current=Date.now();
+  void refreshMailbox();
+ };
+ const [online,setOnline]=useState(()=>navigator.onLine);
+ useEffect(()=>{
+  const resume=()=>resumeRefresh.current(false);
+  const reconnect=()=>{setOnline(true);resumeRefresh.current(true);};
+  const disconnect=()=>setOnline(false);
+  document.addEventListener('visibilitychange',resume);
+  window.addEventListener('focus',resume);
+  window.addEventListener('pageshow',resume);
+  window.addEventListener('online',reconnect);
+  window.addEventListener('offline',disconnect);
+  const prefetch=window.setTimeout(()=>{if(liveToken)Object.values(panelImports).forEach(load=>void load().catch(()=>{}));},4000);
+  return ()=>{
+   document.removeEventListener('visibilitychange',resume);
+   window.removeEventListener('focus',resume);
+   window.removeEventListener('pageshow',resume);
+   window.removeEventListener('online',reconnect);
+   window.removeEventListener('offline',disconnect);
+   window.clearTimeout(prefetch);
+  };
  },[]);
  useEffect(()=>{
   if (!liveToken||!hosted) return;
@@ -1180,7 +1215,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
    <b>{message.subject}</b><small>{message.company||message.name}{message.due&&<> · <time dateTime={message.due}>Due {day(message.due+'T12:00:00')}</time></>}</small>
   </button>) : <p>{empty}</p>}
  </section>)}</div>
- {onSignOut&&liveToken&&<BidImportReport token={liveToken}/>}
+ {onSignOut&&liveToken&&<React.Suspense fallback={null}><BidImportReport token={liveToken}/></React.Suspense>}
  <section className="activity"><h2>Recent activity</h2>{[...mail].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,6).map(m=><button key={m.id} onClick={()=>{go('Inbox');open(m)}}>{tag(m)}<b>{m.subject}</b><span>{m.name}</span><ArrowRight size={16}/></button>)}</section></div>:
  <div className="workspace">
  <section className="message-list">
@@ -1197,6 +1232,7 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
  <div className="list-toolbar">{marked.length?<><button onClick={()=>setMarked([])}>{marked.length} selected ×</button><button title="Archive selected" className="icon" onClick={()=>move(marked,'Archive')}><Archive size={16}/></button><button title="Delete selected" className="icon" onClick={()=>move(marked,'Trash')}><Trash2 size={16}/></button></>:<><div className="tabs">{['All mail','Unread'].map(f=><button key={f} className={filter===f?'on':''} onClick={()=>{setFilter(f);setLimit(60)}} disabled={!!query}>{f}{f==='Unread'&&nav==='Inbox'&&<span>{unreadIncoming}</span>}</button>)}</div><button className={'icon '+(!['All mail','Unread'].includes(filter)?'accent':'')} title="Filter messages" onClick={()=>setMenu(menu==='filters'?'':'filters')}><SlidersHorizontal size={17}/></button></>}
  {menu==='filters'&&<div className="popover filters">{['All mail','Unread','Starred','Attachments','Incoming','Urgent'].map(f=><button key={f} onClick={()=>{setFilter(f);setMenu('')}}>{f}{filter===f&&<Check size={14}/>}</button>)}</div>}</div>
  <div className="rows">
+ {liveToken&&!online&&<div className="offline-banner" role="status">You are offline. Showing mail already loaded. It refreshes when you reconnect.</div>}
  {mailboxIssue&&<div className="empty" role="alert">{mailboxIssue} <button type="button" className="project-tag" onClick={()=>void refreshMailbox()}>Retry mailbox</button></div>}
  {nav==='Drafts'&&!query?draftList.length?draftList.map(d=><button className="draft-row" key={d.id} disabled={saving} onClick={()=>reopenDraft(d.id)}><span className="tag rose">Draft</span><b>{d.subject||'(No subject)'}</b><span>{d.to||'No recipient'}</span></button>):<div className="empty">{draftSyncError||'No drafts yet.'}{draftSyncError&&<button className="project-tag" onClick={()=>void syncPreferences()}>Retry</button>}</div>:list.length?list.slice(0,limit).map((m,i)=><div key={m.id} className={'mail-row '+(m.id===currentRow?.id?'selected ':'')+(m.unread?'unread':'')}>
  <div className="row-side"><input type="checkbox" disabled={!!liveToken} aria-label={'Select '+m.subject} checked={marked.includes(m.id)} onChange={e=>setMarked(e.target.checked?[...marked,m.id]:marked.filter(x=>x!==m.id))}/><button className={'star '+(m.star?'starred':'')} disabled={!!liveToken&&m.id.startsWith('out-')} title={m.star?'Remove star':'Star message'} onClick={()=>change([m.id],{star:!m.star})}><Star size={14}/></button></div>
@@ -1338,8 +1374,8 @@ function App({liveToken,onSignOut,largeUploads=false,contactLookup=false}:{liveT
   </ul>
   {sendReceipt.thread&&<button type="button" className="project-tag" onClick={()=>{go('Sent');setSendReceipt(null);}}>View in Sent</button>}
  </section>}
- {teamOpen&&liveToken&&<AdminConsole self={account} request={(path,body)=>liveRequest(path,body)} onClose={()=>setTeamOpen(false)}
-  onChanged={()=>void liveRequest('profile').then((data:{profile?:Profile})=>{if(data.profile)setProfile(data.profile)}).catch(()=>{})}/>}
+ {teamOpen&&liveToken&&<React.Suspense fallback={null}><AdminConsole self={account} request={(path,body)=>liveRequest(path,body)} onClose={()=>setTeamOpen(false)}
+  onChanged={()=>void liveRequest('profile').then((data:{profile?:Profile})=>{if(data.profile)setProfile(data.profile)}).catch(()=>{})}/></React.Suspense>}
  {help&&<div className="modal-back centered" onClick={()=>setHelp(false)}><section className="shortcuts" role="dialog" aria-label="Keyboard shortcuts" onClick={e=>e.stopPropagation()}><header><b>Keyboard shortcuts</b><button className="icon" title="Close shortcuts" onClick={()=>setHelp(false)}><X size={19}/></button></header>{[['C','Compose'],['/','Search'],['⌘R','Reply'],['⌘⇧R','Refresh mailbox'],['⌘F','Forward'],['⌘/Ctrl+Enter','Send open draft'],['E','Archive selected message'],['Esc','Close dialog or message'],['?','Show shortcuts']].map(([k,l])=><p key={k}><kbd>{k}</kbd> {l}</p>)}</section></div>}
  {toast&&<div className="toast" role="status"><Check size={17}/>{toast}</div>}
  </div>
@@ -1407,10 +1443,17 @@ function HostedInbox({ready,highLevelOrigins,highLevelIssues,largeUploads,contac
 }
 
 const root=createRoot(document.getElementById('root')!);
+if (import.meta.env.PROD&&'serviceWorker' in navigator&&window.parent===window&&!['127.0.0.1','localhost','[::1]'].includes(location.hostname)) {
+ window.addEventListener('load',()=>{void navigator.serviceWorker.register('/sw.js').catch(()=>{});});
+}
+const offlineStart=()=>{
+ root.render(<div className="login-page" role="alert">You are offline. The inbox opens when you reconnect.</div>);
+ window.addEventListener('online',()=>location.reload(),{once:true});
+};
 if (new URLSearchParams(location.search).get('sandbox')==='1') root.render(<App/>);
 else if (localToken) root.render(<App liveToken={localToken}/>);
 else if (import.meta.env.PROD && !['127.0.0.1','localhost','[::1]'].includes(location.hostname)) {
  hostedRequest('status').then(status=>{
   root.render(status.live?<HostedInbox ready={status.ready} highLevelOrigins={status.highLevelOrigins||[]} highLevelIssues={status.highLevelIssues||[]} largeUploads={status.largeFiles===true} contactLookup={status.contactLookup===true}/>:<App/>);
- }).catch(()=>root.render(<div className="login-page" role="alert">The mailbox service is unavailable. Reload to try again.</div>));
+ }).catch(()=>navigator.onLine?root.render(<div className="login-page" role="alert">The mailbox service is unavailable. Reload to try again.</div>):offlineStart());
 } else root.render(<App/>);

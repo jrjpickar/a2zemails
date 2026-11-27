@@ -351,3 +351,15 @@ select, kbd, .project-tag, .gray, .attachments h3 span, .chips button { backgrou
 .smart-replies button { max-width: 100%; padding: 7px 12px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: inherit; font: inherit; font-size: 13px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 .smart-replies button:hover:not(:disabled) { border-color: currentColor; }
 .smart-replies-get { display: inline-flex; align-items: center; gap: 6px; }
+
+.offline-banner {
+ position: sticky;
+ top: 0;
+ z-index: 20;
+ padding: 8px 12px;
+ background: var(--accent);
+ color: #fff;
+ font-size: 13px;
+ font-weight: 600;
+ text-align: center;
+}
